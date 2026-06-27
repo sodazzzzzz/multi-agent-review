@@ -62,6 +62,42 @@ defmodule Aggregator.Polish do
     %{overrides: overrides, applied: map_size(overrides), rejected: rejected}
   end
 
+  @prompt_preamble """
+  Ты — редактор замечаний код-ревью. Ниже JSON-массив кластеров: у каждого стабильный
+  id и замороженные факты (file, line, severity, consensus) плюс сырые сообщения агентов.
+  Для КАЖДОГО кластера верни одно улучшенное сообщение: 1–3 предложения, ясно и по делу,
+  на русском, без markdown и без префиксов severity. Факты НЕ меняй.
+  Ответь СТРОГО JSON-массивом вида [{"id": <число>, "message": "<текст>"}] и ничем больше.
+  """
+
+  @doc """
+  Построить промпт для модели-причёсывателя из замороженных кластеров.
+
+  Даём по каждому кластеру id + замороженные факты и сырые сообщения всех агентов;
+  просим вернуть строго JSON-массив `[{"id","message"}]`. Чистая функция — сам вызов
+  модели живёт в `Aggregator.Claude`.
+  """
+  @spec prompt([Cluster.t()]) :: String.t()
+  def prompt(clusters) when is_list(clusters) do
+    @prompt_preamble <> "\n\n" <> Jason.encode!(Enum.map(clusters, &cluster_brief/1))
+  end
+
+  @doc """
+  Разобрать сырой ответ модели в список правок (`rewrite()`), терпимо к мусору.
+
+  Принимает чистый JSON-массив либо JSON в ```-заборе/с прозой вокруг (выкусываем
+  `[...]`). Возвращает список map'ов (элементы-не-map отброшены) либо `[]`. Дальше — в `merge/2`.
+  """
+  @spec parse_rewrites(term()) :: [rewrite()]
+  def parse_rewrites(raw) when is_binary(raw) do
+    case extract_array(raw) do
+      {:ok, list} when is_list(list) -> Enum.filter(list, &is_map/1)
+      _ -> []
+    end
+  end
+
+  def parse_rewrites(_non_binary), do: []
+
   # --- внутреннее ---
 
   defp approve(rewrite, index) when is_map(rewrite) do
@@ -105,6 +141,35 @@ defmodule Aggregator.Polish do
       :error -> true
       {:ok, ^frozen} -> true
       {:ok, _other} -> false
+    end
+  end
+
+  defp cluster_brief(%Cluster{} = c) do
+    %{
+      id: c.id,
+      file: c.file,
+      line: c.line,
+      severity: c.severity,
+      consensus: c.consensus,
+      messages: c.items |> Enum.map(& &1.message) |> Enum.reject(&is_nil/1)
+    }
+  end
+
+  # Сначала пробуем весь текст как JSON; если модель добавила прозу/```-забор —
+  # выкусываем подстроку от первой `[` до последней `]` (жадный `.*` с флагом /s).
+  defp extract_array(text) do
+    trimmed = String.trim(text)
+
+    case Jason.decode(trimmed) do
+      {:ok, list} when is_list(list) -> {:ok, list}
+      _ -> slice_brackets(trimmed)
+    end
+  end
+
+  defp slice_brackets(text) do
+    case Regex.run(~r/\[.*\]/s, text) do
+      [json] -> Jason.decode(json)
+      _ -> :error
     end
   end
 end
