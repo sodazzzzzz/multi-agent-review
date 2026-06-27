@@ -56,6 +56,9 @@ defmodule Aggregator.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
+      # Рантайм.
+      {:jason, "~> 1.4"},
+      {:ex_json_schema, "~> 0.11"},
       # Инструменты разработки/CI (не идут в рантайм-релиз).
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
