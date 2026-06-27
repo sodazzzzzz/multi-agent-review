@@ -22,7 +22,19 @@ defmodule Aggregator.Finding do
   defstruct [:agent, :file, :line, :severity, :category, :message, :suggestion]
 
   @doc """
-  Собрать `Finding` из map'а с **строковыми** ключами (как отдаёт `Jason.decode/1`).
+  Разобрать целый конверт агента `{"agent": ..., "findings": [...]}` в список `Finding`.
+
+  По контракту `agent` лежит на верхнем уровне, а не в каждом finding — поэтому он
+  «протекает» в каждый элемент. Предполагается, что конверт уже прошёл
+  `Aggregator.Schema.validate/1`.
+  """
+  @spec from_envelope(map()) :: [t()]
+  def from_envelope(%{"agent" => agent, "findings" => findings}) when is_list(findings) do
+    Enum.map(findings, fn finding -> from_map(Map.put(finding, "agent", agent)) end)
+  end
+
+  @doc """
+  Собрать одиночный `Finding` из map'а с **строковыми** ключами (как отдаёт `Jason.decode/1`).
 
   Лишние ключи игнорируются; отсутствующие опциональные поля → `nil`.
   Обязательные `agent`/`file`/`severity` должны присутствовать.
