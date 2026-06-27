@@ -7,8 +7,9 @@ defmodule Aggregator.Diff do
   неё есть номер на RIGHT-стороне — то есть добавленная (`+`) или контекстная (` `);
   удалённые (`-`) строки RIGHT-номера не имеют.
 
-  Парсер ведёт явный флаг in_hunk, чтобы заголовки файла (`--- a/…`, `+++ b/…`) не
-  путались с контентом (содержимое строки тоже может начинаться с `-`/`+`).
+  Имя файла берём из заголовка `+++ b/<path>` (а не из `diff --git a/… b/…`): это
+  однозначно даже когда путь содержит пробелы или подстроку ` b/`. `+++ /dev/null`
+  (удалённый файл) → строки не привязываем. Вход терпим к CRLF.
   """
 
   @type t :: %{optional(String.t()) => MapSet.t(pos_integer())}
@@ -17,7 +18,7 @@ defmodule Aggregator.Diff do
   @spec right_lines(String.t()) :: t()
   def right_lines(patch) when is_binary(patch) do
     patch
-    |> String.split("\n")
+    |> String.split(["\r\n", "\n"])
     |> Enum.reduce(%{file: nil, right: 0, in_hunk: false, acc: %{}}, &step/2)
     |> Map.fetch!(:acc)
   end
@@ -33,35 +34,28 @@ defmodule Aggregator.Diff do
     end
   end
 
-  # Новый файл: путь берём из "diff --git a/… b/…" (однозначный маркер), сбрасываем хунк.
-  defp step("diff --git " <> rest, state) do
-    %{state | file: new_path(rest), right: 0, in_hunk: false}
-  end
+  # Граница файла: путь возьмём из "+++ b/…", здесь только сбрасываем состояние.
+  defp step("diff --git " <> _rest, state), do: %{state | file: nil, in_hunk: false}
 
   # Заголовок хунка "@@ -a,b +c,d @@": стартовая RIGHT-строка = c, входим в хунк.
-  defp step("@@" <> _ = line, state) do
-    %{state | right: hunk_start(line), in_hunk: true}
-  end
+  defp step("@@" <> _ = line, state), do: %{state | right: hunk_start(line), in_hunk: true}
 
-  # Вне хунка (заголовки index/---/+++/режимы) — игнорируем.
-  defp step(_line, %{in_hunk: false} = state), do: state
+  # До хунка — заголовки файла; внутри хунка — контент.
+  defp step(line, %{in_hunk: false} = state), do: header(line, state)
+  defp step(line, %{in_hunk: true} = state), do: content(line, state)
 
-  # Внутри хунка считаем RIGHT-строки.
-  defp step(line, %{in_hunk: true, file: file, right: right, acc: acc} = state) do
+  # Имя нового файла однозначно из "+++ b/path"; удалённый файл — без привязки строк.
+  defp header("+++ /dev/null", state), do: %{state | file: nil}
+  defp header("+++ b/" <> path, state), do: %{state | file: path}
+  defp header(_other, state), do: state
+
+  defp content(line, %{file: file, right: right, acc: acc} = state) do
     case line do
       "+" <> _ -> %{state | right: right + 1, acc: record(acc, file, right)}
       " " <> _ -> %{state | right: right + 1, acc: record(acc, file, right)}
       "-" <> _ -> state
       "\\" <> _ -> state
       _ -> state
-    end
-  end
-
-  # "a/lib/x.ex b/lib/x.ex" → "lib/x.ex" (new-сторона после " b/").
-  defp new_path(rest) do
-    case String.split(rest, " b/", parts: 2) do
-      [_a, b] -> b
-      _ -> nil
     end
   end
 
@@ -72,7 +66,9 @@ defmodule Aggregator.Diff do
     end
   end
 
-  defp record(acc, file, line) do
-    Map.update(acc, file, MapSet.new([line]), &MapSet.put(&1, line))
-  end
+  # nil-файл (например, после "+++ /dev/null") строк не накапливает.
+  defp record(acc, nil, _line), do: acc
+
+  defp record(acc, file, line),
+    do: Map.update(acc, file, MapSet.new([line]), &MapSet.put(&1, line))
 end

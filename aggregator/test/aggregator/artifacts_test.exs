@@ -47,4 +47,12 @@ defmodule Aggregator.ArtifactsTest do
     assert result.failed == []
     assert Artifacts.missing_agents(result, ["claude", "codex"]) == ["claude", "codex"]
   end
+
+  @tag :tmp_dir
+  test "валидный JSON, но не объект ([]) уходит в failed, не роняя разбор", %{tmp_dir: dir} do
+    write(dir, "review-codex/review-codex.json", "[1,2,3]")
+    result = Artifacts.load(dir)
+    assert result.ok == []
+    assert [%{source: _}] = result.failed
+  end
 end
