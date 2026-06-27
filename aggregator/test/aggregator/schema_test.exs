@@ -77,6 +77,17 @@ defmodule Aggregator.SchemaTest do
     test "findings не массив отвергается" do
       assert {:error, _} = Schema.validate(%{"agent" => "claude", "findings" => "nope"})
     end
+
+    test "не-объект на верхнем уровне → ошибка, без краша" do
+      for non_object <- [[], "строка", 42, true, nil] do
+        assert {:error, _} = Schema.validate(non_object)
+      end
+    end
+
+    test "пустой suggestion отвергается (minLength)" do
+      assert {:error, _} =
+               Schema.validate(envelope("claude", [finding_map(%{"suggestion" => ""})]))
+    end
   end
 
   describe "validate_json/1" do
@@ -91,6 +102,12 @@ defmodule Aggregator.SchemaTest do
     test "валидный JSON, но невалидная схема → список причин" do
       assert {:error, reasons} = Schema.validate_json(Jason.encode!(envelope("gpt5")))
       assert is_list(reasons)
+    end
+
+    test "валидный JSON-не-объект → {:error}, без краша" do
+      assert {:error, _} = Schema.validate_json("[1,2,3]")
+      assert {:error, _} = Schema.validate_json("\"просто строка\"")
+      assert {:error, _} = Schema.validate_json("42")
     end
   end
 end
