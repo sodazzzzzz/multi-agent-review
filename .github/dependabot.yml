@@ -1,7 +1,8 @@
 version: 2
 updates:
   # Elixir/Hex dependencies (mix project lives under aggregator/).
-  - package-ecosystem: hex
+  # Dependabot's ecosystem id for Elixir/Hex is "mix", not "hex".
+  - package-ecosystem: mix
     directory: "/aggregator"
     schedule:
       interval: weekly
