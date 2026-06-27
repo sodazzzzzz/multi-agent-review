@@ -19,6 +19,7 @@ defmodule Aggregator.Claude do
 
   @default_model "claude-opus-4-8"
   @default_bin "claude"
+  @default_timeout_ms 120_000
 
   @doc """
   Причесать прозу: отдать модели `prompt`, вернуть сырой текст ответа (или `""`).
@@ -30,6 +31,25 @@ defmodule Aggregator.Claude do
   """
   @spec rewrite(String.t(), keyword()) :: String.t()
   def rewrite(prompt, opts \\ []) when is_binary(prompt) do
+    timeout = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
+    task = Task.async(fn -> run(prompt, opts) end)
+
+    # System.cmd сам по себе таймаута НЕ имеет: зависший claude подвесил бы весь
+    # прогон до job-таймаута раннера. Оборачиваем в Task — по таймауту brutal_kill
+    # закрывает порт и убивает внешний процесс. Причёсывание best-effort → "".
+    case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+      {:ok, raw} ->
+        raw
+
+      _timeout_or_crash ->
+        Logger.warning("claude не уложился в #{timeout} мс; пропускаю причёсывание")
+        ""
+    end
+  end
+
+  # Выполняется внутри Task; любой сбой ловим здесь и отдаём "", чтобы Task не упал
+  # (иначе линк уронил бы вызывающего).
+  defp run(prompt, opts) do
     bin = Keyword.get(opts, :bin, @default_bin)
 
     case System.cmd(bin, args(prompt, opts), stderr_to_stdout: false) do

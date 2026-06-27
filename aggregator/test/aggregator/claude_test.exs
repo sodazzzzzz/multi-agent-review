@@ -41,4 +41,12 @@ defmodule Aggregator.ClaudeTest do
     File.chmod!(script, 0o755)
     assert Claude.rewrite("p", bin: script) == ""
   end
+
+  @tag :tmp_dir
+  test "зависший claude убивается по таймауту → \"\"", %{tmp_dir: dir} do
+    script = Path.join(dir, "hang.sh")
+    File.write!(script, "#!/bin/sh\nsleep 30\n")
+    File.chmod!(script, 0o755)
+    assert Claude.rewrite("p", bin: script, timeout_ms: 100) == ""
+  end
 end
