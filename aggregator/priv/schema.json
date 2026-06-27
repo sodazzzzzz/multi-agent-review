@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Multi-agent review — findings envelope",
+  "description": "Жёсткий контракт вывода каждого агент-джоба. Один файл = один агент.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["agent", "findings"],
+  "properties": {
+    "agent": {
+      "type": "string",
+      "enum": ["claude", "codex", "deepseek"]
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "line", "severity", "category", "message", "suggestion"],
+        "properties": {
+          "file": {
+            "type": "string",
+            "minLength": 1
+          },
+          "line": {
+            "type": ["integer", "null"],
+            "minimum": 1
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["P0", "P1", "P2"]
+          },
+          "category": {
+            "type": "string",
+            "enum": ["bug", "security", "performance", "style", "design", "test"]
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          },
+          "suggestion": {
+            "type": ["string", "null"]
+          }
+        }
+      }
+    }
+  }
+}
