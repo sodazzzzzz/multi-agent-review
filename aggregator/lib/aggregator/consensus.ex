@@ -19,8 +19,12 @@ defmodule Aggregator.Consensus do
 
   P0 > P1 > P2. Реализовано как `min_by` по рангу, потому что меньший ранг —
   серьёзнее. Не «чини» на `max_by`: это перевернёт блокировку merge.
+
+  **Контракт:** список непустой. На `[]` падает `Enum.EmptyError` — намеренно
+  (как `severity_rank/1` на неизвестном значении): кластер всегда содержит ≥ 1
+  finding, поэтому пустой вход = баг выше по стеку, и упасть лучше, чем вернуть тихий мусор.
   """
-  @spec max_severity([Aggregator.Finding.t()]) :: String.t()
+  @spec max_severity([Aggregator.Finding.t(), ...]) :: String.t()
   def max_severity(findings) do
     findings
     |> Enum.map(& &1.severity)

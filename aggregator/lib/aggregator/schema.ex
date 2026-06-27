@@ -21,14 +21,20 @@ defmodule Aggregator.Schema do
   Провалидировать уже разобранный конверт (map со строковыми ключами).
 
   Возвращает `:ok` или `{:error, reasons}` со списком человекочитаемых причин.
+
+  Не-объект на верхнем уровне (валидный JSON вида `[]`/`"x"`/`42`/`null`) — это тоже
+  «невалидно по контракту», поэтому возвращается `{:error, _}`, а НЕ исключение:
+  иначе `Aggregator.Artifacts.load/1` уронил бы весь разбор вместо пометки агента упавшим.
   """
-  @spec validate(map()) :: :ok | {:error, [String.t()]}
+  @spec validate(term()) :: :ok | {:error, [String.t()]}
   def validate(data) when is_map(data) do
     case Validator.validate(resolved(), data) do
       :ok -> :ok
       {:error, errors} -> {:error, format(errors)}
     end
   end
+
+  def validate(_non_object), do: {:error, ["корень должен быть JSON-объектом"]}
 
   @doc """
   Декодировать сырой JSON и провалидировать.
