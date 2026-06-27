@@ -73,16 +73,33 @@ defmodule Aggregator.Render do
   end
 
   defp inline_body(c, ctx) do
+    code = suggestion(c)
+    fence = suggestion_fence(code)
+
     """
     #{badge(c, ctx)}
 
     #{message(c, ctx)}
 
-    ```suggestion
-    #{suggestion(c)}
-    ```
+    #{fence}suggestion
+    #{code}
+    #{fence}
     """
     |> String.trim_trailing()
+  end
+
+  # Забор (≥3 бэктика) длиннее самой длинной серии бэктиков ВНУТРИ кода: иначе
+  # `suggestion`, сам содержащий ```, закрыл бы блок раньше → битый markdown,
+  # и GitHub отверг бы весь POST review 422-м. Переменная длина забора — стандартный
+  # CommonMark-приём, поддерживаемый и suggestion-блоками GitHub.
+  defp suggestion_fence(code) do
+    longest =
+      ~r/`+/
+      |> Regex.scan(code)
+      |> Enum.map(fn [run] -> String.length(run) end)
+      |> Enum.max(fn -> 0 end)
+
+    String.duplicate("`", max(3, longest + 1))
   end
 
   # Первый непустой suggestion среди findings кластера.

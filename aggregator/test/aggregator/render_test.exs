@@ -165,5 +165,26 @@ defmodule Aggregator.RenderTest do
       out = Render.render(clusters, %{diff_index: in_hunk("lib/a.ex", [10])})
       assert out.summary =~ "однокликовая правка"
     end
+
+    test "обычный suggestion (без бэктиков) обрамляется забором из 3 бэктиков" do
+      clusters = Cluster.build([finding(file: "lib/a.ex", line: 10, suggestion: "x = 1")])
+      out = Render.render(clusters, %{diff_index: in_hunk("lib/a.ex", [10])})
+      assert [%{body: body}] = out.comments
+      assert body =~ "```suggestion\n"
+      refute body =~ "````suggestion"
+    end
+
+    test "suggestion с тройными бэктиками → забор длиннее, блок не закрывается раньше" do
+      code = "```\nIO.puts(1)\n```"
+      clusters = Cluster.build([finding(file: "lib/a.ex", line: 10, suggestion: code)])
+      out = Render.render(clusters, %{diff_index: in_hunk("lib/a.ex", [10])})
+      assert [%{body: body}] = out.comments
+
+      # внутри серия из 3 бэктиков → внешний забор минимум 4
+      assert body =~ "````suggestion\n"
+      assert body =~ code
+      # закрывающий забор тоже из 4 бэктиков
+      assert String.ends_with?(body, "\n````")
+    end
   end
 end
