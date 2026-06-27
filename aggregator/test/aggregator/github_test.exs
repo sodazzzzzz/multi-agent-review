@@ -81,10 +81,33 @@ defmodule Aggregator.GithubTest do
       assert decode(req.body) == %{"body" => "сводка"}
     end
 
-    test "сетевой сбой → {:error, exception} (без ретрая на нетранзиентной ошибке)" do
+    test "сетевой сбой → {:error, exception}" do
       adapter = fn request -> {request, %RuntimeError{message: "boom"}} end
-      c = client(adapter, retry: false)
+      c = client(adapter)
       assert {:error, %RuntimeError{message: "boom"}} = Github.post_summary(c, "x")
+    end
+
+    test "2xx с не-map телом не роняет извлечение (html_url → nil)" do
+      c = client(stub(200, "<html>ok</html>"))
+      assert {:ok, nil} = Github.post_summary(c, "x")
+    end
+  end
+
+  describe "идемпотентность" do
+    test "POST не ретраится: адаптер вызывается один раз даже на 500" do
+      test = self()
+
+      adapter = fn request ->
+        send(test, :called)
+        {request, Req.Response.new(status: 500, body: %{"message" => "boom"})}
+      end
+
+      c = client(adapter)
+      assert {:error, {:http, 500, _}} = Github.post_summary(c, "x")
+      assert_received :called
+
+      # ретрая нет → второго вызова быть не должно (иначе дубль коммента в PR)
+      refute_received :called
     end
   end
 

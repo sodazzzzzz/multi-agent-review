@@ -49,9 +49,10 @@ defmodule Aggregator.Github do
           {"accept", "application/vnd.github+json"},
           {"x-github-api-version", @api_version}
         ],
-        # Идемпотентный POST коммента/ревью + транзиентные сетевые сбои — безопасно ретраить.
-        retry: :transient,
-        max_retries: 3
+        # POST коммента/ревью НЕ идемпотентен: ретрай после «ответ потерялся, но
+        # сервер успел создать объект» продублировал бы коммент в PR. Лучше упасть —
+        # CLI залогирует, а перезапуск явный и редкий (по /rerun-review).
+        retry: false
       ]
       |> Req.new()
       |> Req.merge(Keyword.get(opts, :req_options, []))
@@ -71,7 +72,7 @@ defmodule Aggregator.Github do
   def post_summary(%__MODULE__{} = c, body) when is_binary(body) do
     c.req
     |> Req.post(url: issues_path(c), json: %{body: body})
-    |> handle(fn resp_body -> resp_body["html_url"] end)
+    |> handle(&html_url/1)
   end
 
   @doc """
@@ -126,4 +127,9 @@ defmodule Aggregator.Github do
   end
 
   defp handle({:error, reason}, _extract), do: {:error, reason}
+
+  # Тело успешного ответа обычно map; защищаемся от неожиданного не-JSON, чтобы
+  # один странный 2xx не уронил весь прогон (этос: деградировать, а не падать).
+  defp html_url(body) when is_map(body), do: body["html_url"]
+  defp html_url(_non_map), do: nil
 end
