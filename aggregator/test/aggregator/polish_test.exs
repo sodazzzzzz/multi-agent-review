@@ -119,4 +119,62 @@ defmodule Aggregator.PolishTest do
     assert Map.has_key?(result.overrides, 1)
     assert result.overrides[2] == "второй-ок"
   end
+
+  describe "prompt/1" do
+    test "включает преамбулу и замороженные факты с сырыми сообщениями" do
+      cs =
+        Cluster.build([
+          finding(agent: "claude", file: "lib/a.ex", line: 10, severity: "P0", message: "плохо"),
+          finding(
+            agent: "codex",
+            file: "lib/a.ex",
+            line: 10,
+            severity: "P1",
+            message: "тоже плохо"
+          )
+        ])
+
+      p = Polish.prompt(cs)
+      assert p =~ "СТРОГО JSON"
+      assert p =~ "lib/a.ex"
+      assert p =~ ~s("id":1)
+      assert p =~ "плохо"
+      assert p =~ "тоже плохо"
+    end
+  end
+
+  describe "parse_rewrites/1" do
+    test "чистый JSON-массив → список map" do
+      assert [%{"id" => 1, "message" => "x"}] =
+               Polish.parse_rewrites(~s([{"id":1,"message":"x"}]))
+    end
+
+    test "JSON в ```-заборе извлекается" do
+      raw = "```json\n[{\"id\":2,\"message\":\"y\"}]\n```"
+      assert [%{"id" => 2}] = Polish.parse_rewrites(raw)
+    end
+
+    test "проза вокруг массива — массив выкусывается" do
+      raw = ~s(Вот результат: [{"id":3,"message":"z"}] спасибо)
+      assert [%{"id" => 3}] = Polish.parse_rewrites(raw)
+    end
+
+    test "элементы-не-map отфильтровываются" do
+      assert [%{"id" => 4, "message" => "ok"}] =
+               Polish.parse_rewrites(~s([1, "str", {"id":4,"message":"ok"}]))
+    end
+
+    test "мусор/пусто/не-строка → []" do
+      assert Polish.parse_rewrites("извините, не могу") == []
+      assert Polish.parse_rewrites("") == []
+      assert Polish.parse_rewrites(nil) == []
+      assert Polish.parse_rewrites(%{}) == []
+    end
+
+    test "parse_rewrites → merge: ответ модели применяется к message" do
+      cs = Cluster.build([finding(agent: "claude", line: 1, severity: "P1")])
+      result = Polish.merge(cs, Polish.parse_rewrites(~s([{"id":1,"message":"причёсано"}])))
+      assert result.overrides == %{1 => "причёсано"}
+    end
+  end
 end
