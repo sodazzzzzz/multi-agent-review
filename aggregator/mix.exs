@@ -8,7 +8,37 @@ defmodule Aggregator.MixProject do
       elixir: "~> 1.20",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
-      deps: deps()
+      aliases: aliases(),
+      deps: deps(),
+      dialyzer: dialyzer()
+    ]
+  end
+
+  # Запускаем эти задачи в :test, чтобы анализ покрывал и test/support.
+  def cli do
+    [preferred_envs: [check: :test]]
+  end
+
+  # Единая «калитка» Definition of Done — её же гоняет CI по матрице.
+  defp aliases do
+    [
+      check: [
+        "format --check-formatted",
+        "compile --warnings-as-errors",
+        "credo --strict",
+        "deps.audit",
+        "dialyzer",
+        "test"
+      ]
+    ]
+  end
+
+  # PLT'ы живут под priv/plts (в .gitignore) — CI кэширует их одной директорией.
+  defp dialyzer do
+    [
+      plt_core_path: "priv/plts",
+      plt_local_path: "priv/plts",
+      plt_add_apps: [:ex_unit, :mix]
     ]
   end
 
@@ -26,8 +56,10 @@ defmodule Aggregator.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      # {:dep_from_hexpm, "~> 0.3.0"},
-      # {:dep_from_git, git: "https://github.com/elixir-lang/my_dep.git", tag: "0.1.0"}
+      # Инструменты разработки/CI (не идут в рантайм-релиз).
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false}
     ]
   end
 end

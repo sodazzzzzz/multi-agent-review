@@ -22,3 +22,6 @@ erl_crash.dump
 # Ignore package tarball (built via "mix hex.build").
 aggregator-*.tar
 
+# Dialyzer PLT files (cached in CI, rebuilt locally).
+/priv/plts/
+
