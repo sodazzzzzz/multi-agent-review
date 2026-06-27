@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege by default; individual jobs widen as needed.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Single source of truth for the toolchain. Bump together.
+  ELIXIR_VERSION: "1.20"
+  OTP_VERSION: "28"
+  # Mirror the local `mix check` env so warnings cover test/support too and the
+  # build cache stays coherent across jobs.
+  MIX_ENV: test
+
+# The mix project lives in aggregator/, not the repo root.
+defaults:
+  run:
+    working-directory: aggregator
+
+jobs:
+  # Static analysis + compile gate. One matrix leg per check = parallel,
+  # individually-required status checks that share identical setup.
+  checks:
+    name: ${{ matrix.task }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { task: format-check, cmd: mix format --check-formatted }
+          - { task: compile-warnings-as-errors, cmd: mix compile --warnings-as-errors }
+          - { task: credo, cmd: mix credo --strict }
+          - { task: deps-audit, cmd: mix deps.audit }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        id: beam
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - name: Cache deps and _build
+        uses: actions/cache@v4
+        with:
+          path: |
+            aggregator/deps
+            aggregator/_build
+          key: ${{ runner.os }}-mix-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('aggregator/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
+
+      - run: mix deps.get
+      - run: ${{ matrix.cmd }}
+
+  # Type checking with a cached PLT (the slow part to build).
+  dialyzer:
+    name: dialyzer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        id: beam
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - name: Cache deps and _build
+        uses: actions/cache@v4
+        with:
+          path: |
+            aggregator/deps
+            aggregator/_build
+          key: ${{ runner.os }}-mix-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('aggregator/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
+
+      - run: mix deps.get
+
+      # PLT lives under aggregator/priv/plts (see dialyzer/0 in mix.exs); cache it
+      # separately so it survives across runs while toolchain + deps are unchanged.
+      - name: Cache Dialyzer PLT
+        uses: actions/cache@v4
+        with:
+          path: aggregator/priv/plts
+          key: ${{ runner.os }}-plt-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('aggregator/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-plt-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
+
+      - run: mix dialyzer --format github
+
+  # Test suite (pure modules, no DB or external services).
+  test:
+    name: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        id: beam
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - name: Cache deps and _build
+        uses: actions/cache@v4
+        with:
+          path: |
+            aggregator/deps
+            aggregator/_build
+          key: ${{ runner.os }}-mix-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('aggregator/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
+
+      - run: mix deps.get
+      - run: mix test
+
+  # Secret scanning over the full history.
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-24.04
+    # On pull_request the action lists PR commits via the API, which needs
+    # pull-requests:read (the workflow defaults to contents:read only).
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
