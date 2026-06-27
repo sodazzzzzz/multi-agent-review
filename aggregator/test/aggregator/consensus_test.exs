@@ -24,6 +24,10 @@ defmodule Aggregator.ConsensusTest do
     test "одинаковые severity → она же" do
       assert Consensus.max_severity([finding(severity: "P1"), finding(severity: "P1")]) == "P1"
     end
+
+    test "пустой список падает намеренно (контракт: вход непустой)" do
+      assert_raise Enum.EmptyError, fn -> Consensus.max_severity([]) end
+    end
   end
 
   describe "count/1 — консенсус = число РАЗНЫХ агентов" do
