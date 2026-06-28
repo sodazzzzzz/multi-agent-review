@@ -203,4 +203,36 @@ defmodule Aggregator.RenderTest do
       refute Render.render([]).summary =~ "Промпт для ИИ-агента"
     end
   end
+
+  describe "лимит размера (защита от 422 GitHub)" do
+    test "большой PR не пробивает лимит — деградирует/усекается, обзор не теряется" do
+      big =
+        for i <- 1..200 do
+          finding(
+            file: "lib/f#{i}.ex",
+            line: i,
+            severity: "P1",
+            message: String.duplicate("очень длинное описание проблемы ", 30),
+            suggestion: String.duplicate("x = #{i}\n", 8)
+          )
+        end
+
+      out = Render.render(Cluster.build(big))
+      assert String.length(out.summary) <= 60_000
+      assert out.summary =~ "лимит"
+
+      # шапка и сами находки всё равно на месте — обзор не пропал целиком
+      assert out.summary =~ "Мульти-агентное ревью"
+      assert out.summary =~ "### Находки"
+    end
+
+    test "обычный PR: полный вид влезает — без пометок о деградации, с промптом" do
+      out =
+        Render.render(Cluster.build([finding(file: "lib/a.ex", line: 1, suggestion: "x = 1")]))
+
+      refute out.summary =~ "не уместил"
+      refute out.summary =~ "обрезан"
+      assert out.summary =~ "Промпт для ИИ-агента"
+    end
+  end
 end

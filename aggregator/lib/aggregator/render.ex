@@ -36,6 +36,11 @@ defmodule Aggregator.Render do
 
   @full_panel 3
 
+  # Лимит тела issue-комментария GitHub — 65536 символов; держим запас. Полный вид
+  # (диффы + промпт, дублирующий suggestion'ы) на большом PR легко его пробивает →
+  # POST вернул бы 422 и ВЕСЬ обзор пропал бы. Поэтому деградируем по тирам.
+  @max_body 60_000
+
   @doc "Построить ОДИН консолидированный коммент-ревью из кластеров."
   @spec render([Cluster.t()], map()) :: output()
   def render(clusters, context \\ %{}) when is_list(clusters) do
@@ -58,18 +63,48 @@ defmodule Aggregator.Render do
 
   # --- сборка коммента ---
 
+  # Тиры по убыванию богатства; берём первый влезающий в лимит. Если даже компактный
+  # список не влез (сотни находок) — жёстко режем. Обзор не должен теряться целиком.
   defp summary(clusters, ctx) do
+    Enum.find_value([{true, true}, {true, false}, {false, false}], fn {rich, prompt} ->
+      body = assemble(clusters, ctx, rich, prompt)
+      if String.length(body) <= @max_body, do: body
+    end) || hard_cap(assemble(clusters, ctx, false, false))
+  end
+
+  defp assemble(clusters, ctx, rich, prompt) do
     [
       "## 🔍 Мульти-агентное ревью",
       overview(clusters, ctx),
       failed_banner(ctx.failed_agents),
       gate_line(ctx.decision),
-      findings_section(clusters, ctx),
-      fix_all_section(clusters, ctx),
+      size_note(rich, prompt, clusters),
+      findings_section(clusters, ctx, rich),
+      if(prompt, do: fix_all_section(clusters, ctx)),
       footer()
     ]
     |> Enum.reject(&blank?/1)
     |> Enum.join("\n\n")
+  end
+
+  # Пометка о деградации — только когда вид НЕ полный и находки есть.
+  defp size_note(true, true, _clusters), do: nil
+  defp size_note(_rich, _prompt, []), do: nil
+
+  defp size_note(false, _prompt, _clusters),
+    do: "> ⚠️ Полный вывод не уместился в лимит GitHub — диффы и промпт свёрнуты, находки списком."
+
+  defp size_note(true, false, _clusters),
+    do: "> ⚠️ Промпт «исправь всё» опущен — обзор не уместился бы в лимит GitHub."
+
+  # Последний предохранитель: даже компактный вид не влез — режем по границе строки.
+  defp hard_cap(body) do
+    if String.length(body) <= @max_body do
+      body
+    else
+      cut = body |> String.slice(0, @max_body - 60) |> String.replace(~r/\n[^\n]*\z/, "")
+      cut <> "\n\n> ⚠️ …обзор обрезан по лимиту GitHub (слишком много находок)."
+    end
   end
 
   defp overview(clusters, ctx) do
@@ -94,11 +129,17 @@ defmodule Aggregator.Render do
 
   # --- список находок ---
 
-  defp findings_section([], _ctx), do: "✅ Замечаний нет."
+  defp findings_section([], _ctx, _rich), do: "✅ Замечаний нет."
 
-  defp findings_section(clusters, ctx) do
+  # rich: с дропдаунами/диффами; компактно: все находки одной строкой-буллетом.
+  defp findings_section(clusters, ctx, true) do
     blocks = Enum.map(clusters, &finding_entry(&1, ctx))
     Enum.join(["### Находки (по консенсусу)" | blocks], "\n\n")
+  end
+
+  defp findings_section(clusters, ctx, false) do
+    bullets = Enum.map(clusters, &("- " <> headline(&1, ctx)))
+    Enum.join(["### Находки (по консенсусу)" | bullets], "\n")
   end
 
   # С готовой правкой → раскрывающийся <details> с диффом; без неё → обычный буллет.
