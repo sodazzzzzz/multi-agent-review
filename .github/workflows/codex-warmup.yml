@@ -1,0 +1,41 @@
+name: codex-warmup
+
+# Codex (ChatGPT-план) рефрешит токен только ПРИ ИСПОЛЬЗОВАНИИ; неактивная сессия протухает
+# (~8-дневная граница рефреша). Гоняем тривиальный `codex exec` дважды в неделю — это рефрешит
+# одноразовый refresh-токен — и сохраняем обновлённый auth.json назад в секрет. Без этого Codex
+# отвалится между ревью. Делит ресурс codex-auth с codex-джобом в review.yml (не отменяем).
+on:
+  schedule:
+    - cron: "0 6 * * 1,4" # Пн и Чт 06:00 UTC — запас против 8-дневной границы
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-auth
+  cancel-in-progress: false
+
+jobs:
+  warmup:
+    if: ${{ vars.ENABLE_CODEX == 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      CODEX_HOME: ${{ github.workspace }}/.codex
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Codex CLI
+        run: npm install -g @openai/codex
+      - name: Restore Codex auth
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+        run: bash scripts/codex_auth.sh restore
+      - name: Warmup run (рефреш токена)
+        run: |
+          codex exec -s read-only -a never --skip-git-repo-check --ephemeral "Reply with OK" >/dev/null
+      - name: Persist refreshed Codex auth
+        if: always()
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          GH_TOKEN: ${{ secrets.CODEX_SECRETS_PAT }}
+        run: bash scripts/codex_auth.sh persist

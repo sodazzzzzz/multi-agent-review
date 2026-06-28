@@ -140,9 +140,55 @@ jobs:
           path: review-deepseek.json
           if-no-files-found: ignore
 
+  # Третий агент — Codex (ChatGPT-план). Opt-in по vars.ENABLE_CODEX: без него джоб
+  # дремлет, а панель остаётся 2-агентной (см. expected-agents в aggregate). Auth —
+  # round-trip: restore из секрета → codex exec → persist обновлённого auth.json назад
+  # (refresh-токен одноразовый). Скрипты из base-ref; diff — это данные (read-only sandbox).
+  codex:
+    needs: [gate, prepare]
+    if: needs.gate.outputs.run == 'true' && vars.ENABLE_CODEX == 'true'
+    runs-on: ubuntu-latest
+    # Сериализуем ВСЕ codex-джобы (и warmup) глобально и НЕ отменяем: refresh-токен
+    # одноразовый, отмена посреди рефреша осиротит токен. cancel-in-progress: false → очередь.
+    concurrency:
+      group: codex-auth
+      cancel-in-progress: false
+    env:
+      CODEX_HOME: ${{ github.workspace }}/.codex
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.base }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: diff
+      - name: Install Codex CLI
+        run: npm install -g @openai/codex
+      - name: Restore Codex auth
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+        run: bash scripts/codex_auth.sh restore
+      - name: Review
+        env:
+          CODEX_MODEL: ${{ vars.CODEX_MODEL }}
+        run: bash scripts/review_codex.sh diff.patch review-codex.json
+      # Сохраняем обновлённый токен ВСЕГДА (codex мог рефрешнуть и до падения ревью).
+      - name: Persist refreshed Codex auth
+        if: always()
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          GH_TOKEN: ${{ secrets.CODEX_SECRETS_PAT }}
+        run: bash scripts/codex_auth.sh persist
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: review-codex
+          path: review-codex.json
+          if-no-files-found: ignore
+
   # Сводим всё в один обзор. if: always() — упавший агент не отменяет агрегацию.
   aggregate:
-    needs: [gate, claude, deepseek]
+    needs: [gate, claude, deepseek, codex]
     if: always() && needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -163,4 +209,6 @@ jobs:
           reviews-dir: _artifacts
           diff-path: _artifacts/diff/diff.patch
           fail-on: ${{ vars.FAIL_ON || 'none' }}
-          expected-agents: claude,deepseek
+          # Панель зависит от того, включён ли Codex: 3/3 при ENABLE_CODEX, иначе 2/2
+          # (чтобы не маячило вечное «codex не отработал», когда его и не звали).
+          expected-agents: ${{ vars.ENABLE_CODEX == 'true' && 'claude,codex,deepseek' || 'claude,deepseek' }}
