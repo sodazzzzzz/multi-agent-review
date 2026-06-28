@@ -128,22 +128,50 @@ defmodule Aggregator.RenderTest do
     end
   end
 
-  describe "консолидированный вид — один коммент, дропдауны, дифф" do
+  describe "консолидированный вид — один коммент, находки плоским списком" do
     test "inline-комментов больше нет — всё в summary (comments == [])" do
       clusters = Cluster.build([finding(file: "lib/a.ex", line: 10, suggestion: "x = 1")])
       out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [{10, "  x = 0"}])})
       assert out.comments == []
     end
 
-    test "находка с правкой → <details> с diff «сломанное → предложение»" do
+    test "каждая находка — обычный буллет (и с правкой, и без)" do
       clusters =
         Cluster.build([
-          finding(file: "lib/a.ex", line: 10, severity: "P0", suggestion: "x = 1")
+          finding(file: "lib/a.ex", line: 10, severity: "P0", suggestion: "x = 1"),
+          finding(file: "lib/b.ex", line: 5, severity: "P2", suggestion: nil, message: "плохо")
         ])
 
       out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [{10, "  x = 0"}])})
+      assert out.summary =~ "### Находки"
+      assert out.summary =~ "- **P0**"
+      assert out.summary =~ "- **P2**"
+    end
+
+    test "сколько бы правок ни было — дропдаун ровно один (находки не сворачиваются)" do
+      index =
+        Map.merge(diff_index("lib/a.ex", [{10, "x=0"}]), diff_index("lib/b.ex", [{20, "y=0"}]))
+
+      clusters =
+        Cluster.build([
+          finding(file: "lib/a.ex", line: 10, severity: "P0", suggestion: "x = 1"),
+          finding(file: "lib/b.ex", line: 20, severity: "P1", suggestion: "y = 2")
+        ])
+
+      out = Render.render(clusters, %{diff_index: index})
+      assert out.summary |> String.split("<details>") |> length() == 2
+    end
+  end
+
+  describe "общий дропдаун — код-доказательства + промпт" do
+    test "находка с правкой → внутри дропдауна diff «сломанное → предложение»" do
+      clusters =
+        Cluster.build([finding(file: "lib/a.ex", line: 10, severity: "P0", suggestion: "x = 1")])
+
+      out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [{10, "  x = 0"}])})
       assert out.summary =~ "<details>"
-      assert out.summary =~ "<summary>"
+      assert out.summary =~ "Код-доказательства"
+      assert out.summary =~ "Сломанный код"
       assert out.summary =~ "```diff"
       assert out.summary =~ "-   x = 0"
       assert out.summary =~ "+ x = 1"
@@ -154,16 +182,19 @@ defmodule Aggregator.RenderTest do
       out = Render.render(clusters, %{diff_index: %{}})
       assert out.summary =~ "```diff"
       assert out.summary =~ "+ x = 1"
-      refute out.summary =~ "\n- "
+
+      # внутри diff-блока нет удаляемой (-) стороны (буллеты находок «- …» не в счёт)
+      refute out.summary =~ "diff\n- "
     end
 
-    test "находка без suggestion → обычный буллет, без diff-блока" do
+    test "ни одной правки → блока доказательств нет, но промпт есть" do
       clusters =
         Cluster.build([finding(file: "lib/a.ex", line: 10, suggestion: nil, message: "плохо")])
 
       out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [{10, "code"}])})
-      assert out.summary =~ "- **P2**"
       refute out.summary =~ "```diff"
+      refute out.summary =~ "Сломанный код"
+      assert out.summary =~ "#### Промпт"
     end
 
     test "suggestion с тройными бэктиками → забор диффа длиннее (блок не рвётся)" do
@@ -173,10 +204,8 @@ defmodule Aggregator.RenderTest do
       assert out.summary =~ "````diff"
       assert out.summary =~ "IO.puts(1)"
     end
-  end
 
-  describe "промпт «исправить все находки»" do
-    test "<details> с готовым текстом-промптом и всеми находками" do
+    test "готовый текст-промпт перечисляет все находки" do
       clusters =
         Cluster.build([
           finding(
@@ -190,7 +219,7 @@ defmodule Aggregator.RenderTest do
         ])
 
       out = Render.render(clusters, %{diff_index: %{}})
-      assert out.summary =~ "Промпт для ИИ-агента"
+      assert out.summary =~ "для ИИ-агента"
       assert out.summary =~ "```text"
       assert out.summary =~ "1. lib/a.ex:10"
       assert out.summary =~ "2. lib/b.ex:5"
@@ -199,8 +228,42 @@ defmodule Aggregator.RenderTest do
       assert out.summary =~ "safe()"
     end
 
-    test "пустые кластеры → промпта нет" do
-      refute Render.render([]).summary =~ "Промпт для ИИ-агента"
+    test "пустые кластеры → дропдауна нет" do
+      out = Render.render([]).summary
+      refute out =~ "для ИИ-агента"
+      refute out =~ "<details>"
+    end
+  end
+
+  describe "лимит размера (защита от 422 GitHub)" do
+    test "большой PR не пробивает лимит — деградирует/усекается, обзор не теряется" do
+      big =
+        for i <- 1..200 do
+          finding(
+            file: "lib/f#{i}.ex",
+            line: i,
+            severity: "P1",
+            message: String.duplicate("очень длинное описание проблемы ", 30),
+            suggestion: String.duplicate("x = #{i}\n", 8)
+          )
+        end
+
+      out = Render.render(Cluster.build(big))
+      assert String.length(out.summary) <= 60_000
+      assert out.summary =~ "лимит"
+
+      # шапка и сами находки всё равно на месте — обзор не пропал целиком
+      assert out.summary =~ "Мульти-агентное ревью"
+      assert out.summary =~ "### Находки"
+    end
+
+    test "обычный PR: полный вид влезает — без пометок о деградации, с промптом" do
+      out =
+        Render.render(Cluster.build([finding(file: "lib/a.ex", line: 1, suggestion: "x = 1")]))
+
+      refute out.summary =~ "не уместил"
+      refute out.summary =~ "обрезан"
+      assert out.summary =~ "для ИИ-агента"
     end
   end
 end

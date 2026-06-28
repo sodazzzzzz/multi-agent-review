@@ -11,9 +11,11 @@ defmodule Aggregator.Render do
     * список ВСЕХ находок (ничего не прячем), отсортированный `Cluster`'ом по
       консенсусу; у каждой — метка уверенности (`N/M`, `low-confidence` при одной
       модели), severity и категория;
-    * у находок с готовой правкой — раскрывающийся `<details>` со сравнением
-      «сломанный код → предложение» (diff-блоком); сам код правки заморожен;
-    * общий `<details>` с готовым ПРОМПТОМ «исправь все находки» для ИИ-агента.
+    * сами находки — плоским списком-буллетами, без дропдаунов (чтобы их легко
+      было сканировать);
+    * один общий `<details>` снизу: «код-доказательства» (diff «сломанный код →
+      предложение» по находкам с готовой правкой; код заморожен) + готовый ПРОМПТ
+      «исправь все находки» для ИИ-агента.
 
   Никакой сети — детерминированно. Текст замечания берётся из `:messages`
   (одобренные `Aggregator.Polish`-правки по `id`), иначе — детерминированный из
@@ -35,6 +37,11 @@ defmodule Aggregator.Render do
   @type output :: %{summary: String.t(), comments: []}
 
   @full_panel 3
+
+  # Лимит тела issue-комментария GitHub — 65536 символов; держим запас. Полный вид
+  # (диффы + промпт, дублирующий suggestion'ы) на большом PR легко его пробивает →
+  # POST вернул бы 422 и ВЕСЬ обзор пропал бы. Поэтому деградируем по тирам.
+  @max_body 60_000
 
   @doc "Построить ОДИН консолидированный коммент-ревью из кластеров."
   @spec render([Cluster.t()], map()) :: output()
@@ -58,18 +65,55 @@ defmodule Aggregator.Render do
 
   # --- сборка коммента ---
 
+  # Полный вид = список находок + общий дропдаун (доказательства + промпт). Если он не
+  # влезает в лимит — деградируем до одного списка находок; если и тот не влез (сотни
+  # находок) — жёстко режем. Обзор не теряется целиком. Компактный вид считаем максимум
+  # один раз: hard_cap вернёт его как есть, если влезает, иначе усечёт.
   defp summary(clusters, ctx) do
+    full = assemble(clusters, ctx, true)
+
+    if String.length(full) <= @max_body,
+      do: full,
+      else: hard_cap(assemble(clusters, ctx, false))
+  end
+
+  defp assemble(clusters, ctx, extras) do
     [
       "## 🔍 Мульти-агентное ревью",
       overview(clusters, ctx),
       failed_banner(ctx.failed_agents),
       gate_line(ctx.decision),
+      size_note(extras, clusters),
       findings_section(clusters, ctx),
-      fix_all_section(clusters, ctx),
+      if(extras, do: action_section(clusters, ctx)),
       footer()
     ]
     |> Enum.reject(&blank?/1)
     |> Enum.join("\n\n")
+  end
+
+  # Пометка о деградации — только когда общий дропдаун свёрнут и находки есть.
+  defp size_note(true, _clusters), do: nil
+  defp size_note(_extras, []), do: nil
+
+  defp size_note(false, _clusters),
+    do:
+      "> ⚠️ Доказательства и промпт свёрнуты — полный вывод не уместился в лимит GitHub " <>
+        "(слишком много находок). Находки — списком ниже."
+
+  @cut_note "\n\n> ⚠️ …обзор обрезан по лимиту GitHub (слишком много находок)."
+
+  # Последний предохранитель: даже компактный вид не влез — режем по границе строки.
+  # Резервируем РОВНО длину приписываемой пометки (а не «магические» 60), иначе
+  # cut + @cut_note может перелезть лимит на пару символов и нарушить инвариант.
+  defp hard_cap(body) do
+    if String.length(body) <= @max_body do
+      body
+    else
+      keep = @max_body - String.length(@cut_note)
+      cut = body |> String.slice(0, keep) |> String.replace(~r/\n[^\n]*\z/, "")
+      cut <> @cut_note
+    end
   end
 
   defp overview(clusters, ctx) do
@@ -94,19 +138,14 @@ defmodule Aggregator.Render do
 
   # --- список находок ---
 
+  # Все находки — обычными буллетами, без дропдаунов. По решению продукта код-диффы и
+  # промпт уходят в отдельный общий дропдаун, а сам список находок остаётся плоским и
+  # легко сканируемым.
   defp findings_section([], _ctx), do: "✅ Замечаний нет."
 
   defp findings_section(clusters, ctx) do
-    blocks = Enum.map(clusters, &finding_entry(&1, ctx))
-    Enum.join(["### Находки (по консенсусу)" | blocks], "\n\n")
-  end
-
-  # С готовой правкой → раскрывающийся <details> с диффом; без неё → обычный буллет.
-  defp finding_entry(%Cluster{} = c, ctx) do
-    case code_diff_block(c, ctx) do
-      nil -> "- #{headline(c, ctx)}"
-      diff -> details_block(headline(c, ctx), diff)
-    end
+    bullets = Enum.map(clusters, &("- " <> headline(&1, ctx)))
+    Enum.join(["### Находки (по консенсусу)" | bullets], "\n")
   end
 
   defp details_block(summary_line, body) do
@@ -145,18 +184,47 @@ defmodule Aggregator.Render do
   defp broken_code(%Cluster{file: file, line: line}, ctx),
     do: Diff.line_content(ctx.diff_index, file, line)
 
-  # --- промпт «исправь всё» ---
+  # --- общий дропдаун: код-доказательства + промпт «исправь всё» ---
 
-  defp fix_all_section([], _ctx), do: nil
+  defp action_section([], _ctx), do: nil
 
-  defp fix_all_section(clusters, ctx) do
+  defp action_section(clusters, ctx) do
+    body =
+      [evidence_block(clusters, ctx), prompt_block(clusters, ctx)]
+      |> Enum.reject(&blank?/1)
+      |> Enum.join("\n\n")
+
+    details_block("🛠 Код-доказательства и промпт для ИИ-агента — исправить все находки", body)
+  end
+
+  # «Сломанный код → предложенная правка» по каждой находке, у которой есть правка.
+  # Находки без suggestion сюда не попадают (нечего показывать в +стороне) — они уже
+  # перечислены буллетами в списке находок.
+  defp evidence_block(clusters, ctx) do
+    clusters
+    |> Enum.map(fn c -> {c, code_diff_block(c, ctx)} end)
+    |> Enum.reject(fn {_c, diff} -> is_nil(diff) end)
+    |> case do
+      [] ->
+        nil
+
+      pairs ->
+        entries = Enum.map(pairs, fn {c, diff} -> evidence_entry(c, ctx, diff) end)
+        Enum.join(["#### Сломанный код → предложенная правка" | entries], "\n\n")
+    end
+  end
+
+  defp evidence_entry(%Cluster{} = c, ctx, diff) do
+    head =
+      "**<code>#{html_escape(location(c))}</code>** — #{html_escape(oneline(message(c, ctx)))}"
+
+    "#{head}\n\n#{diff}"
+  end
+
+  defp prompt_block(clusters, ctx) do
     prompt = fix_all_prompt(clusters, ctx)
     fence = fence_for([prompt])
-
-    details_block(
-      "🛠 Промпт для ИИ-агента — исправить все находки",
-      "#{fence}text\n#{prompt}\n#{fence}"
-    )
+    "#### Промпт\n\n#{fence}text\n#{prompt}\n#{fence}"
   end
 
   defp fix_all_prompt(clusters, ctx) do
