@@ -121,6 +121,11 @@ defmodule Aggregator.RenderTest do
       assert out.summary =~ "&lt;тег&gt;"
       assert out.summary =~ "&amp; co"
     end
+
+    test "путь файла экранируется внутри <code> (защита HTML-контекста)" do
+      out = Render.render(Cluster.build([finding(file: "src/<x>.ex", line: 1)]))
+      assert out.summary =~ "<code>src/&lt;x&gt;.ex:1</code>"
+    end
   end
 
   describe "консолидированный вид — один коммент, дропдауны, дифф" do

@@ -114,9 +114,12 @@ defmodule Aggregator.Render do
     |> Enum.join("\n")
   end
 
-  # Шапка находки: severity · уверенность · категория · `файл:строка` — текст (1 строкой).
+  # Шапка находки: severity · уверенность · категория · файл:строка — текст (1 строкой).
+  # Путь — в <code> с экранированием (а не в `бэктики`): корректно и безопасно и в
+  # HTML-контексте <summary>, и в markdown-буллете, даже если путь содержит < > &.
   defp headline(%Cluster{} = c, ctx) do
-    "#{badge(c, ctx)} · `#{location(c)}` — #{html_escape(oneline(message(c, ctx)))}"
+    "#{badge(c, ctx)} · <code>#{html_escape(location(c))}</code> — " <>
+      html_escape(oneline(message(c, ctx)))
   end
 
   # Блок «сломанный код → предложение» (diff). Только при наличии правки: без
