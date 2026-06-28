@@ -20,8 +20,12 @@ model="${DEEPSEEK_MODEL:-deepseek-v4-pro}"
 
 call_deepseek() {
   local body resp
-  body=$(jq -n --arg model "$model" --arg content "$(build_prompt "$diff_file")" \
-    '{model: $model, stream: false, messages: [{role: "user", content: $content}]}')
+  # --rawfile читает diff из файла (минуя argv-лимит), --arg — короткую инструкцию;
+  # склеиваем в один user-месседж.
+  body=$(jq -n --arg model "$model" --arg instr "$(review_instruction)" \
+    --rawfile diff "$diff_file" \
+    '{model: $model, stream: false,
+      messages: [{role: "user", content: ($instr + "\n\n=== DIFF ===\n" + $diff)}]}')
   resp=$(curl -sS --fail-with-body --max-time 180 \
     -X POST "${base_url%/}/chat/completions" \
     -H "Authorization: Bearer ${DEEPSEEK_API_KEY}" \

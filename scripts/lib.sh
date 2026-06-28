@@ -6,11 +6,12 @@
 # review-<agent>.json. Строгую валидацию по схеме делает аггрегатор (битый артефакт →
 # агент помечается «не отработал»), поэтому здесь — только лёгкая проверка формы + 1 ретрай.
 
-# build_prompt <diff_file> — печатает промпт-контракт с приложенным diff.
-build_prompt() {
-  local diff_file="$1"
+# review_instruction — печатает промпт-контракт БЕЗ диффа (его прикладываем отдельно:
+# для Claude — на stdin, для DeepSeek — в JSON-теле). Так большой PR не упирается в
+# лимит длины ОДНОГО argv-аргумента (Linux MAX_ARG_STRLEN ≈ 128К): дифф идёт мимо argv.
+review_instruction() {
   cat <<'PROMPT'
-Ты — строгий код-ревьюер. Ниже unified diff пулл-реквеста. Найди РЕАЛЬНЫЕ проблемы
+Ты — строгий код-ревьюер. Тебе дан unified diff пулл-реквеста. Найди РЕАЛЬНЫЕ проблемы
 (bug, security, performance, design, test, style) во ВНЕСЁННЫХ изменениях.
 
 Ответь СТРОГО JSON-массивом и НИЧЕМ больше (без markdown, без пояснений):
@@ -23,20 +24,20 @@ build_prompt() {
 - severity: P0 — блокирующая ошибка, P1 — важная, P2 — мелкая.
 - suggestion — только код без markdown-обрамления, либо null.
 - Не выдумывай проблемы. Если их нет — верни [].
-
-=== DIFF ===
 PROMPT
-  cat "$diff_file"
 }
 
-# extract_array <raw> — печатает JSON-массив, если его удалось распознать (иначе пусто).
-# Снимает ```json/```-заборы и проверяет, что результат — массив.
+# extract_array <raw> — печатает JSON-массив находок (иначе пусто). Снимает
+# ```json/```-заборы. Принимает И голый массив, И конверт-объект {…, "findings":[…]}:
+# модели часто заворачивают ответ в объект, даже когда просили массив, — без этого
+# рабочий агент ложно «падал». Лишние ключи конверта тут же отсекаются (берём массив).
 extract_array() {
   local raw="$1" cleaned
   cleaned=$(printf '%s' "$raw" | sed -e 's/^[[:space:]]*```json[[:space:]]*$//' -e 's/^[[:space:]]*```[[:space:]]*$//')
-  if printf '%s' "$cleaned" | jq -e 'type == "array"' >/dev/null 2>&1; then
-    printf '%s' "$cleaned"
-  fi
+  printf '%s' "$cleaned" | jq -ec '
+    if type == "array" then .
+    elif type == "object" and (.findings | type == "array") then .findings
+    else empty end' 2>/dev/null
 }
 
 # finalize <agent> <raw> <out_file> — извлечь массив, обернуть в конверт, записать.
@@ -54,6 +55,7 @@ finalize() {
 run_review() {
   local agent="$1" out="$2" call_fn="$3" attempt content
   for attempt in 1 2; do
+    [ "$attempt" -gt 1 ] && sleep 3 # короткий бэкофф: 2-я попытка против транзиентных сбоев
     content="$("$call_fn" || true)"
     if finalize "$agent" "$content" "$out"; then
       echo "review_${agent}: ok (попытка $attempt) → $out"
