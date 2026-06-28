@@ -22,6 +22,9 @@ defmodule Aggregator.CLI do
   @doc "Энтрипоинт релиза: прогнать и завершить процесс кодом выхода Gate."
   @spec main() :: no_return()
   def main do
+    # Релиз вызывается через `bin/aggregator eval` — приложения загружены, но не
+    # запущены; поднимаем :aggregator (тянет :req/:finch/:logger) перед прогоном.
+    {:ok, _started} = Application.ensure_all_started(:aggregator)
     run() |> System.halt()
   end
 

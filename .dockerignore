@@ -1,0 +1,9 @@
+# Артефакты сборки/тулинга — не должны попасть в build context (бьют по кэшу и
+# могут перетереть свежую компиляцию стейл-билдом по чужому пути).
+aggregator/_build
+aggregator/deps
+aggregator/priv/plts
+aggregator/cover
+**/.git
+**/.elixir_ls
+**/.DS_Store

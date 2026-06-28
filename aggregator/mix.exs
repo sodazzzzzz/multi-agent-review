@@ -10,7 +10,18 @@ defmodule Aggregator.MixProject do
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps(),
-      dialyzer: dialyzer()
+      dialyzer: dialyzer(),
+      releases: releases()
+    ]
+  end
+
+  # Релиз под Docker-action: один self-contained бинарь, энтрипоинт — eval main/0.
+  defp releases do
+    [
+      aggregator: [
+        include_executables_for: [:unix],
+        strip_beams: Mix.env() == :prod
+      ]
     ]
   end
 
