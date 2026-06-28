@@ -25,6 +25,10 @@ inputs:
     description: "Когда валить чек: none | p0 | consensus-p0. По умолчанию advisory (не блокирует)."
     required: false
     default: "none"
+  expected-agents:
+    description: "Ожидаемая панель агентов (через запятую) — для меток N/M и пометок «не отработал»."
+    required: false
+    default: "claude,codex,deepseek"
   cluster-window:
     description: "Окно строк для слияния близких находок в один кластер."
     required: false
@@ -58,6 +62,7 @@ runs:
     REVIEWS_DIR: ${{ inputs.reviews-dir }}
     DIFF_PATH: ${{ inputs.diff-path }}
     FAIL_ON: ${{ inputs.fail-on }}
+    EXPECTED_AGENTS: ${{ inputs.expected-agents }}
     CLUSTER_WINDOW: ${{ inputs.cluster-window }}
     POLISH_MODEL: ${{ inputs.polish-model }}
     CLAUDE_BIN: ${{ inputs.claude-bin }}
