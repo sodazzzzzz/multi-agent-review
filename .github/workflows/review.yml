@@ -1,0 +1,166 @@
+name: multi-agent-review
+
+# Авто-ревью при ОТКРЫТИИ PR; повторный прогон — командой-комментом `/rerun-review`
+# (гейт по author_association). На synchronize авто-ревью НЕТ (экономим токены).
+on:
+  pull_request:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# Один прогон на PR; новый пуш/команда отменяет предыдущий (и снимает гонку
+# рефреша токена Codex в M2c-2).
+concurrency:
+  group: review-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  # Решаем, запускать ли пайплайн, и достаём pr/base/head. Дремлет, пока в репо не
+  # выставлена переменная ENABLE_REVIEW=true (иначе бот молчит на каждом PR/комменте).
+  gate:
+    if: ${{ vars.ENABLE_REVIEW == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      pr: ${{ steps.decide.outputs.pr }}
+      head: ${{ steps.decide.outputs.head }}
+      base: ${{ steps.decide.outputs.base }}
+    steps:
+      - id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          PR_EVENT_NUMBER: ${{ github.event.pull_request.number }}
+          PR_EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_EVENT_BASE: ${{ github.event.pull_request.base.sha }}
+          # Пользовательский ввод — ТОЛЬКО через env (инъекция в `run` исключена):
+          IS_PR_COMMENT: ${{ github.event.issue.pull_request.url != '' }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_ASSOC: ${{ github.event.comment.author_association }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          run=false; pr=""; head=""; base=""
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            run=true
+            pr="$PR_EVENT_NUMBER"; head="$PR_EVENT_HEAD"; base="$PR_EVENT_BASE"
+          elif [ "$EVENT_NAME" = "issue_comment" ] && [ "$IS_PR_COMMENT" = "true" ]; then
+            cmd="$(printf '%s' "$COMMENT_BODY" | tr -d '[:space:]')"
+            if [ "$cmd" = "/rerun-review" ] \
+               && printf '%s\n' OWNER MEMBER COLLABORATOR | grep -qx "$COMMENT_ASSOC"; then
+              pr="$ISSUE_NUMBER"
+              shas="$(gh api "repos/$REPO/pulls/$pr" --jq '"\(.base.sha) \(.head.sha)"')"
+              base="${shas%% *}"; head="${shas##* }"
+              run=true
+            fi
+          fi
+
+          {
+            echo "run=$run"; echo "pr=$pr"; echo "head=$head"; echo "base=$base"
+          } >>"$GITHUB_OUTPUT"
+          echo "gate: run=$run pr=$pr base=$base head=$head"
+
+  # Считаем diff PR один раз. Скрипты берём из BASE-ref (доверенные); diff head — данные.
+  prepare:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.base }}
+          fetch-depth: 0
+      - name: Fetch PR head
+        env:
+          PR: ${{ needs.gate.outputs.pr }}
+        run: git fetch --no-tags origin "refs/pull/${PR}/head"
+      - name: Построить diff
+        env:
+          BASE: ${{ needs.gate.outputs.base }}
+          HEAD: ${{ needs.gate.outputs.head }}
+        run: bash scripts/get_diff.sh "$BASE" "$HEAD" diff.patch changed-files.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: diff
+          path: diff.patch
+          if-no-files-found: error
+
+  claude:
+    needs: [gate, prepare]
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.base }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: diff
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+      - name: Review
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL }}
+        run: bash scripts/review_claude.sh diff.patch review-claude.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: review-claude
+          path: review-claude.json
+          if-no-files-found: ignore
+
+  deepseek:
+    needs: [gate, prepare]
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.base }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: diff
+      - name: Review
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_BASE_URL: ${{ vars.DEEPSEEK_BASE_URL }}
+          DEEPSEEK_MODEL: ${{ vars.DEEPSEEK_MODEL }}
+        run: bash scripts/review_deepseek.sh diff.patch review-deepseek.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: review-deepseek
+          path: review-deepseek.json
+          if-no-files-found: ignore
+
+  # Сводим всё в один обзор. if: always() — упавший агент не отменяет агрегацию.
+  aggregate:
+    needs: [gate, claude, deepseek]
+    if: always() && needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.base }}
+      # download-artifact кладёт каждый артефакт в свою подпапку:
+      # _artifacts/review-<agent>/review-<agent>.json (матчит **/review-*.json),
+      # _artifacts/diff/diff.patch. Поэтому reviews-dir = _artifacts напрямую.
+      - uses: actions/download-artifact@v4
+        with:
+          path: _artifacts
+      - name: Aggregate & post
+        uses: ./
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          pr-number: ${{ needs.gate.outputs.pr }}
+          reviews-dir: _artifacts
+          diff-path: _artifacts/diff/diff.patch
+          fail-on: ${{ vars.FAIL_ON || 'none' }}
+          expected-agents: claude,deepseek

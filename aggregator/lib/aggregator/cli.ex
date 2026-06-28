@@ -155,9 +155,18 @@ defmodule Aggregator.CLI do
       fail_on: env("FAIL_ON", "none"),
       model: env("POLISH_MODEL", @default_model),
       claude_bin: env("CLAUDE_BIN", "claude"),
-      expected_agents: @expected_agents,
+      expected_agents: expected_agents_from_env(),
       github_output: System.get_env("GITHUB_OUTPUT")
     }
+  end
+
+  # Размер ожидаемой панели настраивается (EXPECTED_AGENTS, через запятую): чтобы
+  # 2-агентная конфигурация показывала N/2, а не вечное «третий не отработал».
+  defp expected_agents_from_env do
+    case System.get_env("EXPECTED_AGENTS") do
+      blank when blank in [nil, ""] -> @expected_agents
+      csv -> csv |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
+    end
   end
 
   defp env(key, default), do: System.get_env(key) || default
