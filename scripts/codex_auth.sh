@@ -48,8 +48,18 @@ case "$cmd" in
       echo "codex_auth: auth.json не изменился — токен не ротировался, write-back не нужен"
       exit 0
     fi
-    gh secret set CODEX_AUTH_JSON --repo "$GITHUB_REPOSITORY" <"$auth"
-    echo "codex_auth: обновлённый auth.json записан в секрет CODEX_AUTH_JSON"
+    # С ретраями: транзиентный сбой gh/API не должен осиротить ОДНОРАЗОВЫЙ токен
+    # (codex уже израсходовал его при рефреше — без write-back назад он потерян).
+    for attempt in 1 2 3; do
+      if gh secret set CODEX_AUTH_JSON --repo "$GITHUB_REPOSITORY" <"$auth"; then
+        echo "codex_auth: обновлённый auth.json записан в секрет CODEX_AUTH_JSON"
+        exit 0
+      fi
+      echo "codex_auth: gh secret set не удался (попытка $attempt/3) — повтор" >&2
+      sleep 5
+    done
+    echo "codex_auth: НЕ удалось записать токен — секрет CODEX_AUTH_JSON надо перевыпустить вручную" >&2
+    exit 1
     ;;
 
   *)

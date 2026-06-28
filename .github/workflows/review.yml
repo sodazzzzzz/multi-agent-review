@@ -12,11 +12,13 @@ permissions:
   contents: read
   pull-requests: write
 
-# Один прогон на PR; новый пуш/команда отменяет предыдущий (и снимает гонку
-# рефреша токена Codex в M2c-2).
+# Один прогон на PR за раз. cancel-in-progress: FALSE — НЕ отменяем на лету: codex
+# рефрешит ОДНОРАЗОВЫЙ токен и persist'ит его в конце; отмена посреди рефреша осиротила
+# бы токен (warmup это не чинит — токен уже израсходован). Дубли /rerun-review просто
+# встают в очередь (авто-ревью на synchronize и так нет, так что пуши прогон не плодят).
 concurrency:
   group: review-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   # Решаем, запускать ли пайплайн, и достаём pr/base/head. Дремлет, пока в репо не
@@ -148,6 +150,9 @@ jobs:
     needs: [gate, prepare]
     if: needs.gate.outputs.run == 'true' && vars.ENABLE_CODEX == 'true'
     runs-on: ubuntu-latest
+    # Таймаут, чтобы зависший codex exec не держал вечно lock codex-auth (иначе
+    # заблокирует ВСЕ codex-ревью и warmup).
+    timeout-minutes: 15
     # Сериализуем ВСЕ codex-джобы (и warmup) глобально и НЕ отменяем: refresh-токен
     # одноразовый, отмена посреди рефреша осиротит токен. cancel-in-progress: false → очередь.
     concurrency:

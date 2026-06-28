@@ -20,6 +20,7 @@ jobs:
   warmup:
     if: ${{ vars.ENABLE_CODEX == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10 # чтобы зависший codex exec не держал вечно lock codex-auth
     env:
       CODEX_HOME: ${{ github.workspace }}/.codex
     steps:
