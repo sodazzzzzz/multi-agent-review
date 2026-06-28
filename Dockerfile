@@ -24,7 +24,10 @@ RUN mix compile && mix release
 # --- runtime: минимальный alpine + BEAM-зависимости ---
 FROM alpine:3.21.7 AS runtime
 
-RUN apk add --no-cache libstdc++ openssl ncurses libgcc
+# ca-certificates обязателен: HTTPS к api.github.com через Req/Finch/Mint проверяет
+# сертификат по OS-trust-store (Mint 1.9 verify_peer + public_key:cacerts_get), а
+# castore у нас не подключён. Без него TLS-верификация ненадёжна.
+RUN apk add --no-cache libstdc++ openssl ncurses libgcc ca-certificates
 
 WORKDIR /app
 COPY --from=builder /app/_build/prod/rel/aggregator ./
