@@ -108,14 +108,15 @@ defmodule Aggregator.CLITest do
     assert summary =~ "2/2"
     assert summary =~ "lib/a.ex:10"
 
-    # Правка теперь в дропдауне ВНУТРИ этого же коммента: diff «сломанное → предложение»
+    # Сама находка — буллетом в списке; правка ушла в общий дропдаун: diff
+    # «сломанное → предложение» внутри того же коммента
     assert summary =~ "<details>"
     assert summary =~ "```diff"
     assert summary =~ "- строка 10 в хунке"
     assert summary =~ "+ x = 1"
 
-    # И готовый промпт «исправь все находки»
-    assert summary =~ "Промпт для ИИ-агента"
+    # И готовый промпт «исправь все находки» в том же дропдауне
+    assert summary =~ "для ИИ-агента"
 
     # GITHUB_OUTPUT
     output = File.read!(out_path)
