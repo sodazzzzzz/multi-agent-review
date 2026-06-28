@@ -26,7 +26,10 @@ defmodule Aggregator.CLITest do
     out = Path.join(dir, "claude_out.json")
     File.write!(out, Jason.encode!(%{"type" => "result", "result" => inner}))
     bin = Path.join(dir, "fake_claude.sh")
-    File.write!(bin, "#!/bin/sh\ncat #{out}\n")
+
+    # Путь в кавычки: tmp_dir ExUnit включает имя теста, где бывают скобки/пробелы —
+    # без кавычек sh сломался бы на них (и причёсывание молча отвалилось бы).
+    File.write!(bin, "#!/bin/sh\ncat '#{out}'\n")
     File.chmod!(bin, 0o755)
     bin
   end
@@ -48,18 +51,13 @@ defmodule Aggregator.CLITest do
     Github.new(owner: "o", repo: "r", pr: 7, token: "t", req_options: [adapter: adapter])
   end
 
-  defp gather_posts do
-    assert_received {:posted, url1, body1}
-    assert_received {:posted, url2, body2}
-
-    Enum.reduce([{url1, body1}, {url2, body2}], %{}, fn {url, body}, acc ->
-      decoded = body |> IO.iodata_to_binary() |> Jason.decode!()
-
-      cond do
-        String.contains?(url, "/pulls/") -> Map.put(acc, :review, decoded)
-        String.contains?(url, "/issues/") -> Map.put(acc, :summary, decoded)
-      end
-    end)
+  # Теперь ревью — ОДИН issue-комментарий (inline-комментов к строкам нет).
+  # Возвращает распарсенное тело summary, проверив, что второго постинга не было.
+  defp gather_summary do
+    assert_received {:posted, url, body}
+    assert String.contains?(url, "/issues/")
+    refute_received {:posted, _u, _b}
+    body |> IO.iodata_to_binary() |> Jason.decode!()
   end
 
   setup %{tmp_dir: dir} do
@@ -98,26 +96,26 @@ defmodule Aggregator.CLITest do
     %{cfg: cfg, out_path: out_path, client: capturing_client()}
   end
 
-  test "end-to-end: постит review с suggestion + причёсанный summary, advisory → exit 0",
+  test "end-to-end: ОДИН консолидированный коммент (правка в дропдауне) + причёсанный текст, advisory → exit 0",
        %{cfg: cfg, out_path: out_path, client: client} do
     assert CLI.run(client, cfg) == 0
 
-    posts = gather_posts()
+    summary = gather_summary()["body"]
 
-    # PR-review с однокликовой правкой на строке 10 (в хунке)
-    assert %{"event" => "COMMENT", "comments" => [comment]} = posts.review
-    assert comment["path"] == "lib/a.ex"
-    assert comment["line"] == 10
-    assert comment["side"] == "RIGHT"
-    assert comment["body"] =~ "```suggestion"
-    assert comment["body"] =~ "x = 1"
-
-    # Сводка: причёсанный текст (override), пометка упавшего агента, метка панели
-    summary = posts.summary["body"]
+    # Консолидировано: причёсанный текст (override), упавший агент, метка панели, файл:строка
     assert summary =~ "причёсано P0"
     assert summary =~ "Не отработали: deepseek"
     assert summary =~ "2/2"
     assert summary =~ "lib/a.ex:10"
+
+    # Правка теперь в дропдауне ВНУТРИ этого же коммента: diff «сломанное → предложение»
+    assert summary =~ "<details>"
+    assert summary =~ "```diff"
+    assert summary =~ "- строка 10 в хунке"
+    assert summary =~ "+ x = 1"
+
+    # И готовый промпт «исправь все находки»
+    assert summary =~ "Промпт для ИИ-агента"
 
     # GITHUB_OUTPUT
     output = File.read!(out_path)
@@ -130,8 +128,7 @@ defmodule Aggregator.CLITest do
        %{cfg: cfg, client: client} do
     assert CLI.run(client, %{cfg | fail_on: "p0"}) == 1
 
-    posts = gather_posts()
-    assert posts.summary["body"] =~ "⛔ блокирует merge"
+    assert gather_summary()["body"] =~ "⛔ блокирует merge"
   end
 
   test "нет diff_path → нет inline-комментов, постится только summary",

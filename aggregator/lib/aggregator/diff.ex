@@ -12,9 +12,9 @@ defmodule Aggregator.Diff do
   (удалённый файл) → строки не привязываем. Вход терпим к CRLF.
   """
 
-  @type t :: %{optional(String.t()) => MapSet.t(pos_integer())}
+  @type t :: %{optional(String.t()) => %{optional(pos_integer()) => String.t()}}
 
-  @doc "Построить индекс: файл (new path) → MapSet RIGHT-строк, присутствующих в хунках."
+  @doc "Построить индекс: файл (new path) → `%{RIGHT-строка => её текст}` внутри хунков."
   @spec right_lines(String.t()) :: t()
   def right_lines(patch) when is_binary(patch) do
     patch
@@ -29,9 +29,17 @@ defmodule Aggregator.Diff do
 
   def in_hunk?(index, file, line) do
     case Map.fetch(index, file) do
-      {:ok, set} -> MapSet.member?(set, line)
+      {:ok, lines} -> Map.has_key?(lines, line)
       :error -> false
     end
+  end
+
+  @doc "Текст RIGHT-строки `(file, line)` из диффа, либо `nil`, если её там нет."
+  @spec line_content(t(), String.t(), pos_integer() | nil) :: String.t() | nil
+  def line_content(_index, _file, nil), do: nil
+
+  def line_content(index, file, line) do
+    index |> Map.get(file, %{}) |> Map.get(line)
   end
 
   # Граница файла: путь возьмём из "+++ b/…", здесь только сбрасываем состояние.
@@ -51,8 +59,8 @@ defmodule Aggregator.Diff do
 
   defp content(line, %{file: file, right: right, acc: acc} = state) do
     case line do
-      "+" <> _ -> %{state | right: right + 1, acc: record(acc, file, right)}
-      " " <> _ -> %{state | right: right + 1, acc: record(acc, file, right)}
+      "+" <> rest -> %{state | right: right + 1, acc: record(acc, file, right, rest)}
+      " " <> rest -> %{state | right: right + 1, acc: record(acc, file, right, rest)}
       "-" <> _ -> state
       "\\" <> _ -> state
       _ -> state
@@ -67,8 +75,8 @@ defmodule Aggregator.Diff do
   end
 
   # nil-файл (например, после "+++ /dev/null") строк не накапливает.
-  defp record(acc, nil, _line), do: acc
+  defp record(acc, nil, _line, _text), do: acc
 
-  defp record(acc, file, line),
-    do: Map.update(acc, file, MapSet.new([line]), &MapSet.put(&1, line))
+  defp record(acc, file, line, text),
+    do: Map.update(acc, file, %{line => text}, &Map.put(&1, line, text))
 end
