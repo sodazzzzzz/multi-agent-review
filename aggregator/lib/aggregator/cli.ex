@@ -22,6 +22,9 @@ defmodule Aggregator.CLI do
   @doc "Энтрипоинт релиза: прогнать и завершить процесс кодом выхода Gate."
   @spec main() :: no_return()
   def main do
+    # Релиз вызывается через `bin/aggregator eval` — приложения загружены, но не
+    # запущены; поднимаем :aggregator (тянет :req/:finch/:logger) перед прогоном.
+    {:ok, _started} = Application.ensure_all_started(:aggregator)
     run() |> System.halt()
   end
 
@@ -109,7 +112,15 @@ defmodule Aggregator.CLI do
       {"summary_url", url}
     ]
 
-    File.write(path, Enum.map_join(data, "", fn {k, v} -> "#{k}=#{v}\n" end), [:append])
+    content = Enum.map_join(data, "", fn {k, v} -> "#{k}=#{v}\n" end)
+
+    case File.write(path, content, [:append]) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("не удалось записать GITHUB_OUTPUT (#{path}): #{inspect(reason)}")
+    end
   end
 
   # --- дифф ---
@@ -138,8 +149,8 @@ defmodule Aggregator.CLI do
 
   defp config_from_env do
     %{
-      reviews_dir: env("REVIEWS_DIR", "reviews"),
-      diff_path: System.get_env("DIFF_PATH"),
+      reviews_dir: workspace_path(env("REVIEWS_DIR", "reviews")),
+      diff_path: optional_workspace_path(System.get_env("DIFF_PATH")),
       window: env_int("CLUSTER_WINDOW", 3),
       fail_on: env("FAIL_ON", "none"),
       model: env("POLISH_MODEL", @default_model),
@@ -150,6 +161,20 @@ defmodule Aggregator.CLI do
   end
 
   defp env(key, default), do: System.get_env(key) || default
+
+  # Относительные пути экшена резолвим от GITHUB_WORKSPACE: GitHub монтирует туда
+  # репо/артефакты (download-artifact), а WORKDIR контейнера — /app. Path.expand
+  # оставляет абсолютные пути как есть.
+  defp workspace_path(path) do
+    case System.get_env("GITHUB_WORKSPACE") do
+      ws when is_binary(ws) and ws != "" -> Path.expand(path, ws)
+      _ -> path
+    end
+  end
+
+  # diff-path по умолчанию "" (input не задан) → nil: без inline-комментов, только summary.
+  defp optional_workspace_path(path) when path in [nil, ""], do: nil
+  defp optional_workspace_path(path), do: workspace_path(path)
 
   defp env_int(key, default) do
     with value when is_binary(value) <- System.get_env(key),

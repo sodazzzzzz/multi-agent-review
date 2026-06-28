@@ -1,0 +1,63 @@
+name: "Multi-Agent Review Aggregator"
+description: "Сводит находки нескольких ИИ-ревьюеров в один консенсус-обзор PR с однокликовыми правками."
+author: "sodazzzzzz"
+
+branding:
+  icon: "users"
+  color: "purple"
+
+inputs:
+  github-token:
+    description: "Токен для постинга review/коммента (нужно pull-requests: write)."
+    required: true
+  pr-number:
+    description: "Номер PR, к которому постим обзор."
+    required: true
+  reviews-dir:
+    description: "Директория с артефактами агентов (рекурсивно ищутся review-*.json)."
+    required: false
+    default: "reviews"
+  diff-path:
+    description: "Путь к unified diff PR (для однокликовых suggestion). Пусто → только summary."
+    required: false
+    default: ""
+  fail-on:
+    description: "Когда валить чек: none | p0 | consensus-p0. По умолчанию advisory (не блокирует)."
+    required: false
+    default: "none"
+  cluster-window:
+    description: "Окно строк для слияния близких находок в один кластер."
+    required: false
+    default: "3"
+  polish-model:
+    description: "Модель Claude для причёсывания прозы (best-effort; требует claude в PATH)."
+    required: false
+    default: "claude-opus-4-8"
+  claude-bin:
+    description: "Бинарь claude для причёсывания. Если недоступен — текст остаётся детерминированным."
+    required: false
+    default: "claude"
+
+outputs:
+  clusters:
+    description: "Число кластеров находок в обзоре."
+  blocking:
+    description: "true, если сработало правило fail_on (чек красный)."
+  summary_url:
+    description: "URL запощенного summary-коммента."
+
+runs:
+  using: "docker"
+  image: "Dockerfile"
+  env:
+    GITHUB_TOKEN: ${{ inputs.github-token }}
+    PR_NUMBER: ${{ inputs.pr-number }}
+    # GitHub передаёт GITHUB_REPOSITORY в docker-экшен сам, но прокидываем явно —
+    # CLI на нём строит owner/repo через fetch_env!, пустого значения быть не должно.
+    GITHUB_REPOSITORY: ${{ github.repository }}
+    REVIEWS_DIR: ${{ inputs.reviews-dir }}
+    DIFF_PATH: ${{ inputs.diff-path }}
+    FAIL_ON: ${{ inputs.fail-on }}
+    CLUSTER_WINDOW: ${{ inputs.cluster-window }}
+    POLISH_MODEL: ${{ inputs.polish-model }}
+    CLAUDE_BIN: ${{ inputs.claude-bin }}
