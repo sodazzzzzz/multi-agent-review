@@ -26,18 +26,39 @@ defmodule Aggregator.DiffTest do
   """
 
   describe "right_lines/1" do
-    test "контекст и добавленные строки получают RIGHT-номера, удалённые — нет" do
+    test "контекст и добавленные строки получают RIGHT-номера+текст, удалённые — нет" do
       idx = Diff.right_lines(@patch)
-      assert MapSet.equal?(idx["lib/a.ex"], MapSet.new([1, 2, 3, 4, 5]))
+      assert idx["lib/a.ex"] |> Map.keys() |> MapSet.new() == MapSet.new([1, 2, 3, 4, 5])
+      assert idx["lib/a.ex"][1] == "defmodule A do"
+      assert idx["lib/a.ex"][2] == "  def new, do: 2"
+      assert idx["lib/a.ex"][5] == "end"
     end
 
     test "новый файл (@@ -0,0 +1,2 @@) индексируется с первой строки" do
       idx = Diff.right_lines(@patch)
-      assert MapSet.equal?(idx["lib/b.ex"], MapSet.new([1, 2]))
+      assert idx["lib/b.ex"] |> Map.keys() |> MapSet.new() == MapSet.new([1, 2])
+      assert idx["lib/b.ex"][1] == "defmodule B do"
     end
 
     test "пустой дифф → пустой индекс" do
       assert Diff.right_lines("") == %{}
+    end
+  end
+
+  describe "line_content/3" do
+    setup do
+      %{idx: Diff.right_lines(@patch)}
+    end
+
+    test "возвращает текст RIGHT-строки", %{idx: idx} do
+      assert Diff.line_content(idx, "lib/a.ex", 2) == "  def new, do: 2"
+      assert Diff.line_content(idx, "lib/a.ex", 1) == "defmodule A do"
+    end
+
+    test "нет строки/файла или nil → nil", %{idx: idx} do
+      assert Diff.line_content(idx, "lib/a.ex", 99) == nil
+      assert Diff.line_content(idx, "nope.ex", 1) == nil
+      assert Diff.line_content(idx, "lib/a.ex", nil) == nil
     end
   end
 
@@ -77,7 +98,8 @@ defmodule Aggregator.DiffTest do
       """
 
       idx = Diff.right_lines(patch)
-      assert MapSet.equal?(idx["lib/a b/c.ex"], MapSet.new([1]))
+      assert Map.keys(idx["lib/a b/c.ex"]) == [1]
+      assert idx["lib/a b/c.ex"][1] == "hi"
     end
 
     test "CRLF нормализуется: ключ файла без хвостового \\r" do
@@ -86,7 +108,9 @@ defmodule Aggregator.DiffTest do
 
       idx = Diff.right_lines(patch)
       refute Enum.any?(Map.keys(idx), &String.contains?(&1, "\r"))
-      assert MapSet.equal?(idx["x.ex"], MapSet.new([1, 2]))
+      assert idx["x.ex"] |> Map.keys() |> MapSet.new() == MapSet.new([1, 2])
+      # текст тоже без хвостового \r (split по ["\r\n", "\n"])
+      assert idx["x.ex"][2] == "added"
     end
 
     test "удалённый файл (+++ /dev/null) не даёт записей" do
