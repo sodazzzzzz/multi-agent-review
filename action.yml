@@ -56,9 +56,9 @@ runs:
   env:
     GITHUB_TOKEN: ${{ inputs.github-token }}
     PR_NUMBER: ${{ inputs.pr-number }}
-    # GitHub передаёт GITHUB_REPOSITORY в docker-экшен сам, но прокидываем явно —
-    # CLI на нём строит owner/repo через fetch_env!, пустого значения быть не должно.
-    GITHUB_REPOSITORY: ${{ github.repository }}
+    # GITHUB_REPOSITORY здесь НЕ маппим: в action.yml контекст github.* недоступен (только
+    # inputs.*), и явный `${{ github.repository }}` ломал загрузку экшена. GitHub сам
+    # прокидывает дефолтные GITHUB_* в docker-экшен, так что CLI.client_from_env его получит.
     REVIEWS_DIR: ${{ inputs.reviews-dir }}
     DIFF_PATH: ${{ inputs.diff-path }}
     FAIL_ON: ${{ inputs.fail-on }}
