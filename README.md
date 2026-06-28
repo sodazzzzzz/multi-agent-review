@@ -20,7 +20,9 @@ opt-in через `fail-on`.
 - [x] **Упаковка**: Docker container action (`Dockerfile` + `action.yml`), GHCR release.
 - [x] **Pipeline Claude + DeepSeek** (`scripts/` + `.github/workflows/review.yml`):
       get_diff + обёртки-ревьюеры, триггеры `pull_request[opened]` и `/rerun-review`.
-- [ ] Codex как третий агент (ChatGPT-план, round-trip auth + weekly warmup).
+- [x] **Codex как третий агент** (`scripts/codex_auth.sh` + `scripts/review_codex.sh` +
+      codex-джоб + `codex-warmup.yml`): ChatGPT-план, round-trip auth (restore→`codex exec`→
+      persist обновлённого `auth.json`) + warmup-крон. Opt-in по переменной `ENABLE_CODEX`.
 
 ## Архитектура
 
@@ -28,7 +30,7 @@ opt-in через `fail-on`.
 on: pull_request [opened]  +  issue_comment "/rerun-review"   (reusable workflow)
         ├── job: claude    (ubuntu-latest)          ──► review-claude.json   (artifact)
         ├── job: deepseek  (ubuntu-latest)          ──► review-deepseek.json (artifact)
-        ├── job: codex     (self-hosted, env-gated) ──► review-codex.json    (artifact)
+        ├── job: codex     (hosted, round-trip auth, opt-in) ──► review-codex.json (artifact)
         └── job: aggregate (needs: все три, if: always())  ── ЭТОТ Docker action
                  ├─ schema-валидация артефактов (упавший агент → помечаем, не валим прогон)
                  ├─ детерминированный кластеринг + консенсус + severity   (заморожено)
@@ -38,7 +40,7 @@ on: pull_request [opened]  +  issue_comment "/rerun-review"   (reusable workflow
 ```
 
 «Мозг» (`aggregate`) — Elixir-release в Docker action (этот репозиторий). Оркестровка
-fan-out/fan-in — workflow `.github/workflows/review.yml` (пока Claude + DeepSeek; Codex — следующим).
+fan-out/fan-in — workflow `.github/workflows/review.yml` (Claude + DeepSeek + опционально Codex).
 
 ## Включение пайплайна (в этом репо)
 
@@ -57,6 +59,32 @@ Workflow дремлет, пока не выставлена переменная
 → повторный прогон новым комментом. Упавший агент не валит прогон — помечается в сводке.
 Скрипты-обёртки исполняются из base-ветки (PR-дифф — это данные), секреты доступны только
 на same-repo PR (форки ревью не получают — это by design).
+
+### Codex (опциональный 3-й агент, ChatGPT-план)
+
+Codex подключается **подпиской** (ChatGPT Plus/Pro), а не отдельным API-биллингом. Сложность
+в том, что у ChatGPT-плана **refresh-токен одноразовый (ротируется)**: `codex exec` сам
+рефрешит и переписывает `auth.json` во время прогона, а на эфемерном раннере обновлённый файл
+надо **сохранить назад** — иначе после первой ротации Codex отвалится. Поэтому round-trip:
+restore из секрета → `codex exec` → persist обновлённого `auth.json` в тот же секрет.
+
+1. **Сгенерировать `auth.json`** на доверенной машине: установить Codex (`npm install -g
+   @openai/codex`), выполнить `codex login` (вход через ChatGPT), затем взять содержимое
+   `~/.codex/auth.json` (должно быть `"auth_mode": "chatgpt"` с `tokens.refresh_token`).
+2. **Variables**: `ENABLE_CODEX` = `true`; опц. `CODEX_MODEL` (если не задан — берётся модель
+   аккаунта по умолчанию; id моделей Codex меняются, поэтому жёстко не зашит).
+3. **Secrets**:
+   - `CODEX_AUTH_JSON` — содержимое `auth.json` целиком.
+   - `CODEX_SECRETS_PAT` — fine-grained PAT с правом **Secrets: write** на этот репо (нужен,
+     чтобы записать обновлённый токен назад: `GITHUB_TOKEN` секреты писать не может).
+4. **Warmup**: `.github/workflows/codex-warmup.yml` дважды в неделю гоняет тривиальный
+   `codex exec`, чтобы refresh-токен не протух между ревью (неактивная сессия живёт ~8 дней).
+
+Без `ENABLE_CODEX=true` codex-джоб дремлет, панель остаётся 2-агентной (без вечного «codex не
+отработал»). ⚠ Использование ChatGPT-плана в CI — на твой риск по ToS OpenAI; альтернатива —
+указать в `DEEPSEEK_*`/обёртке OpenAI-совместимый API-ключ. ⚠ Параллельные рефреши одного
+токена сериализованы (`concurrency: codex-auth`, без отмены); если Codex всё же отвалится
+(`refresh token already used`) — перевыпусти `CODEX_AUTH_JSON` шагами 1–3.
 
 ## Использование как отдельный action (шаг `aggregate`)
 
