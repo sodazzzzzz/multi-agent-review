@@ -18,8 +18,9 @@ opt-in через `fail-on`.
       постинг в GitHub (`Github`, Req), причёсывание (`Polish` + `Claude`, best-effort,
       факты заморожены), отрисовка (`Render`), CLI-оркестратор (`CLI`).
 - [x] **Упаковка**: Docker container action (`Dockerfile` + `action.yml`), GHCR release.
-- [ ] Тонкие bash-обёртки агентов (`scripts/`) — get_diff / review_{claude,deepseek,codex}.
-- [ ] Reference reusable workflow (`.github/workflows/review.yml`) с триггером `/rerun-review`.
+- [x] **Pipeline Claude + DeepSeek** (`scripts/` + `.github/workflows/review.yml`):
+      get_diff + обёртки-ревьюеры, триггеры `pull_request[opened]` и `/rerun-review`.
+- [ ] Codex как третий агент (ChatGPT-план, round-trip auth + weekly warmup).
 
 ## Архитектура
 
@@ -37,9 +38,27 @@ on: pull_request [opened]  +  issue_comment "/rerun-review"   (reusable workflow
 ```
 
 «Мозг» (`aggregate`) — Elixir-release в Docker action (этот репозиторий). Оркестровка
-fan-out/fan-in — reusable workflow (в работе), который адоптер подключает у себя.
+fan-out/fan-in — workflow `.github/workflows/review.yml` (пока Claude + DeepSeek; Codex — следующим).
 
-## Использование (шаг `aggregate`)
+## Включение пайплайна (в этом репо)
+
+Workflow дремлет, пока не выставлена переменная-переключатель — чтобы не шуметь, пока
+секреты не готовы. Чтобы включить ревью:
+
+1. **Variables** (Settings → Secrets and variables → Actions → Variables):
+   - `ENABLE_REVIEW` = `true` (главный переключатель).
+   - опц.: `CLAUDE_MODEL`, `DEEPSEEK_MODEL`, `DEEPSEEK_BASE_URL`, `FAIL_ON`.
+2. **Secrets**:
+   - `CLAUDE_CODE_OAUTH_TOKEN` — токен подписки Claude (статичный, `claude setup-token`).
+   - `DEEPSEEK_API_KEY` — ключ DeepSeek (или OpenAI-совместимого прокси).
+   - `GITHUB_TOKEN` — автоматический, ничего настраивать не нужно.
+
+Дальше: **открытие PR** → авто-ревью; **коммент `/rerun-review`** (от OWNER/MEMBER/COLLABORATOR)
+→ повторный прогон новым комментом. Упавший агент не валит прогон — помечается в сводке.
+Скрипты-обёртки исполняются из base-ветки (PR-дифф — это данные), секреты доступны только
+на same-repo PR (форки ревью не получают — это by design).
+
+## Использование как отдельный action (шаг `aggregate`)
 
 Аггрегатор ожидает уже готовые артефакты агентов (`review-*.json`) и, опционально,
 unified diff PR для однокликовых правок:
