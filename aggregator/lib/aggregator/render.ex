@@ -27,7 +27,7 @@ defmodule Aggregator.Render do
     * `:messages`      — `%{id => текст}` после `Polish`. Дефолт `%{}`.
   """
 
-  alias Aggregator.{Cluster, Consensus, Diff}
+  alias Aggregator.{Cluster, Consensus, Diff, Finding}
 
   @type comment :: %{path: String.t(), line: pos_integer(), body: String.t()}
   @type output :: %{summary: String.t(), comments: [comment()]}
@@ -48,12 +48,10 @@ defmodule Aggregator.Render do
   @spec render([Cluster.t()], map()) :: output()
   def render(clusters, context \\ %{}) when is_list(clusters) do
     ctx = normalize(context)
-    {inline, outside} = Enum.split_with(clusters, &inline?(&1, ctx))
+    tagged = Enum.map(clusters, fn c -> {c, inline_anchor(c, ctx)} end)
+    inline = for {c, anchor} <- tagged, not is_nil(anchor), do: inline_comment(c, anchor, ctx)
 
-    %{
-      summary: summary(clusters, outside, ctx),
-      comments: Enum.map(inline, &inline_comment(&1, ctx))
-    }
+    %{summary: summary(tagged, ctx), comments: inline}
   end
 
   defp normalize(context) do
@@ -67,28 +65,46 @@ defmodule Aggregator.Render do
     }
   end
 
-  # Инлайн возможен только если строка кластера реально в хунке диффа (иначе Pulls API → 422).
-  defp inline?(%Cluster{file: file, line: line}, ctx),
-    do: Diff.in_hunk?(ctx.diff_index, file, line)
+  # Якорь инлайна: среди находок кластера, ЧЬЯ строка в хунке диффа, выбираем лучшую —
+  # предпочитаем несущую правку (тогда однокликовый suggestion ляжет на свою же строку),
+  # иначе самую серьёзную. nil → ни одна строка кластера не в диффе → кластер уходит в
+  # «Comments outside the diff». Так инлайн доступен, даже если якорная (мин.) строка
+  # кластера не в хунке, а соседняя из окна — в хунке.
+  defp inline_anchor(%Cluster{file: file, items: items}, ctx) do
+    case Enum.filter(items, &Diff.in_hunk?(ctx.diff_index, file, &1.line)) do
+      [] -> nil
+      in_hunk -> choose_anchor(in_hunk)
+    end
+  end
+
+  defp choose_anchor(findings) do
+    case Enum.filter(findings, &(&1.suggestion not in [nil, ""])) do
+      [] -> Enum.min_by(findings, &Consensus.severity_rank(&1.severity))
+      with_fix -> Enum.min_by(with_fix, &Consensus.severity_rank(&1.severity))
+    end
+  end
 
   # --- summary (обзор-коммент) ---
 
   # Полный вид; если не влез в лимит — компактный (вне-диффовые находки свёрнуты в
   # индекс); если и тот велик — жёстко режем. Обзор не теряется целиком.
-  defp summary(all, outside, ctx) do
-    full = assemble_summary(all, outside, ctx, true)
+  defp summary(tagged, ctx) do
+    full = assemble_summary(tagged, ctx, true)
 
     if String.length(full) <= @max_body,
       do: full,
-      else: hard_cap(assemble_summary(all, outside, ctx, false))
+      else: hard_cap(assemble_summary(tagged, ctx, false))
   end
 
-  defp assemble_summary(all, outside, ctx, full?) do
+  defp assemble_summary(tagged, ctx, full?) do
+    clusters = Enum.map(tagged, &elem(&1, 0))
+    outside = for {c, nil} <- tagged, do: c
+
     [
-      header(all, ctx),
+      header(clusters, ctx),
       failed_banner(ctx.failed_agents),
       gate_line(ctx.decision),
-      findings_details(all, ctx),
+      findings_details(tagged, ctx),
       outside_details(outside, ctx, full?),
       footer(ctx.decision)
     ]
@@ -122,14 +138,19 @@ defmodule Aggregator.Render do
   # Индекс находок — однострочный, в дропдауне (CR-стиль: содержательное свёрнуто).
   defp findings_details([], _ctx), do: nil
 
-  defp findings_details(clusters, ctx) do
-    rows = Enum.map_join(clusters, "\n", &("- " <> index_line(&1, ctx)))
-    details_block("🔎 Findings (#{length(clusters)})", rows)
+  defp findings_details(tagged, ctx) do
+    rows = Enum.map_join(tagged, "\n", fn {c, anchor} -> "- " <> index_line(c, anchor, ctx) end)
+    details_block("🔎 Findings (#{length(tagged)})", rows)
   end
 
-  defp index_line(%Cluster{} = c, ctx) do
+  # Строка индекса. Для инлайн-кластера показываем строку ЯКОРЯ (куда реально лёг коммент
+  # и правка), а не замороженную (мин.) строку кластера — иначе индекс уводил бы на
+  # другую строку. Для вне-диффовых (anchor nil) — строка кластера.
+  defp index_line(%Cluster{} = c, anchor, ctx) do
+    loc = if anchor, do: "#{c.file}:#{anchor.line}", else: location(c)
+
     "#{consensus_badge(c.consensus, ctx.expected)} · #{c.severity} · #{label(category(c))} · " <>
-      "<code>#{html_escape(location(c))}</code> — #{md_escape(title(c, ctx))}"
+      "<code>#{html_escape(loc)}</code> — #{md_escape(title(c, ctx))}"
   end
 
   # Находки вне диффа — отдельный дропдаун с полными записями (инлайн к ним нельзя).
@@ -142,7 +163,7 @@ defmodule Aggregator.Render do
 
   # Компактный режим (summary не влез): только индекс вне-диффовых находок.
   defp outside_details(clusters, ctx, false) do
-    rows = Enum.map_join(clusters, "\n", &("- " <> index_line(&1, ctx)))
+    rows = Enum.map_join(clusters, "\n", &("- " <> index_line(&1, nil, ctx)))
 
     details_block(
       "💬 Comments outside the diff (#{length(clusters)})",
@@ -156,7 +177,7 @@ defmodule Aggregator.Render do
       "<code>#{html_escape(location(c))}</code>",
       finding_text(c, ctx),
       suggestion_code(c),
-      agent_prompt_details(c, ctx)
+      agent_prompt_details(c, location(c), ctx)
     ]
     |> Enum.reject(&blank?/1)
     |> Enum.join("\n\n")
@@ -172,16 +193,16 @@ defmodule Aggregator.Render do
 
   # --- инлайн-комменты ---
 
-  defp inline_comment(%Cluster{file: file, line: line} = c, ctx),
-    do: %{path: file, line: line, body: inline_body(c, ctx)}
+  defp inline_comment(%Cluster{file: file} = c, %Finding{line: line} = anchor, ctx),
+    do: %{path: file, line: line, body: inline_body(c, anchor, ctx)}
 
-  defp inline_body(%Cluster{} = c, ctx) do
+  defp inline_body(%Cluster{file: file} = c, %Finding{line: line} = anchor, ctx) do
     [
       badge_line(c, ctx),
       finding_text(c, ctx),
       found_by(c),
-      committable_suggestion(c),
-      agent_prompt_details(c, ctx)
+      suggestion_block(anchor, c),
+      agent_prompt_details(c, "#{file}:#{line}", ctx)
     ]
     |> Enum.reject(&blank?/1)
     |> Enum.join("\n\n")
@@ -237,42 +258,29 @@ defmodule Aggregator.Render do
     "<sub>found by: #{agents}</sub>"
   end
 
-  # Однокликовый suggestion — ТОЛЬКО из находки на якорной строке кластера (её и
-  # прокомментировали; GitHub применит правку к этой строке). Если правка есть, но с
-  # другой строки окна — отдаём не как committable, а как подписанный код-блок (и она
-  # всё равно попадёт в промпт). Так «Commit suggestion» не затрёт не ту строку.
-  defp committable_suggestion(%Cluster{} = c) do
-    case anchored_suggestion(c) do
-      nil ->
-        non_anchored_hint(c)
-
-      fix ->
-        if String.contains?(fix, "```"),
-          do: details_block("📝 Suggested change (not auto-committable)", fenced(fix, "")),
-          else: details_block("📝 Committable suggestion", "```suggestion\n#{fix}\n```")
-    end
+  # Блок правки в инлайне. Правка ЯКОРНОЙ находки лежит ровно на прокомментированной
+  # строке → отдаём однокликовым `suggestion` (GitHub применит её сюда же). Если у якоря
+  # правки нет, но в кластере есть чья-то — показываем подписанным НЕ-committable блоком
+  # (доказательство не теряем, но и не коммитим не в ту строку). Правка с ```-забором не
+  # может быть нативным suggestion → тоже не-committable.
+  defp suggestion_block(%Finding{suggestion: fix}, _cluster) when is_binary(fix) and fix != "" do
+    if String.contains?(fix, "```"),
+      do: details_block("📝 Suggested change (not auto-committable)", fenced(fix, "")),
+      else: details_block("📝 Committable suggestion", "```suggestion\n#{fix}\n```")
   end
 
-  # Есть правка, но не с якорной строки → показываем как подписанный (не однокликовый)
-  # блок, чтобы код-доказательство не терялось, но и не коммитилось не туда.
-  defp non_anchored_hint(%Cluster{} = c) do
-    case suggestion(c) do
+  defp suggestion_block(_anchor_without_fix, %Cluster{} = cluster) do
+    case suggestion(cluster) do
       nil -> nil
       fix -> details_block("📝 Suggested change (not auto-committable)", fenced(fix, ""))
     end
   end
 
-  defp anchored_suggestion(%Cluster{items: items, line: line}) do
-    Enum.find_value(items, fn f ->
-      if f.line == line and f.suggestion not in [nil, ""], do: f.suggestion
-    end)
-  end
+  defp agent_prompt_details(%Cluster{} = c, loc, ctx),
+    do: details_block("🤖 Prompt for AI agent", fenced(agent_prompt(c, loc, ctx), ""))
 
-  defp agent_prompt_details(%Cluster{} = c, ctx),
-    do: details_block("🤖 Prompt for AI agent", fenced(agent_prompt(c, ctx), ""))
-
-  defp agent_prompt(%Cluster{} = c, ctx) do
-    base = "In #{location(c)}, #{oneline(message(c, ctx))}"
+  defp agent_prompt(%Cluster{} = c, loc, ctx) do
+    base = "In #{loc}, #{oneline(message(c, ctx))}"
 
     case suggestion(c) do
       nil -> base <> " Make a minimal, targeted fix that preserves behavior and style."
