@@ -29,6 +29,17 @@ FROM alpine:3.21.7 AS runtime
 # castore у нас не подключён. Без него TLS-верификация ненадёжна.
 RUN apk add --no-cache libstdc++ openssl ncurses libgcc ca-certificates
 
+# claude CLI — для Polish (best-effort причёсывание прозы внутри контейнера). Ставится
+# через node+npm (проверено на alpine/musl: claude 2.1.195 поднимается, читает
+# CLAUDE_CODE_OAUTH_TOKEN из env, отдаёт {"type":"result","result":...}). При отсутствии
+# токена/любом сбое Aggregator.Claude молча деградирует к детерминированному тексту —
+# Polish никогда не роняет прогон.
+# Версия запинена ради воспроизводимости сборки (образ билдится на каждый прогон, пока не
+# перешли на пред-собранный GHCR-образ). Бамп — поднять номер здесь.
+RUN apk add --no-cache nodejs npm \
+  && npm install -g @anthropic-ai/claude-code@2.1.195 \
+  && npm cache clean --force
+
 WORKDIR /app
 COPY --from=builder /app/_build/prod/rel/aggregator ./
 

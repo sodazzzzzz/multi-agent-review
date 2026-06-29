@@ -111,6 +111,7 @@ unified diff PR для однокликовых правок:
 | `cluster-window` | `3` | окно строк для слияния находок |
 | `polish-model` | `claude-opus-4-8` | модель причёсывания (best-effort) |
 | `claude-bin` | `claude` | бинарь claude; если недоступен — текст детерминированный |
+| `claude-oauth-token` | `""` | OAuth-токен Claude для Polish; пусто/сбой → текст детерминированный |
 
 Outputs: `clusters`, `blocking`, `summary_url`.
 

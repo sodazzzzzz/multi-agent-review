@@ -41,6 +41,10 @@ inputs:
     description: "Бинарь claude для причёсывания. Если недоступен — текст остаётся детерминированным."
     required: false
     default: "claude"
+  claude-oauth-token:
+    description: "OAuth-токен Claude для Polish (авторизует claude CLI в контейнере). Пусто → Polish деградирует к детерминированному тексту."
+    required: false
+    default: ""
 
 outputs:
   clusters:
@@ -66,3 +70,4 @@ runs:
     CLUSTER_WINDOW: ${{ inputs.cluster-window }}
     POLISH_MODEL: ${{ inputs.polish-model }}
     CLAUDE_BIN: ${{ inputs.claude-bin }}
+    CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude-oauth-token }}
