@@ -56,7 +56,9 @@ outputs:
 
 runs:
   using: "docker"
-  image: "Dockerfile"
+  # Релизный образ из GHCR (собирается release.yml на тег v*) — не пересобираем Dockerfile
+  # на каждый прогон. Версия пинится явно; бампится вместе с новым тегом релиза.
+  image: "docker://ghcr.io/sodazzzzzz/multi-agent-review:0.1.0"
   env:
     GITHUB_TOKEN: ${{ inputs.github-token }}
     PR_NUMBER: ${{ inputs.pr-number }}
