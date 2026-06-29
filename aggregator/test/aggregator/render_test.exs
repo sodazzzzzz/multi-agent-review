@@ -4,11 +4,11 @@ defmodule Aggregator.RenderTest do
   import Aggregator.Factory
   alias Aggregator.{Cluster, Render}
 
-  # diff_index теперь хранит и текст строк: %{file => %{line => content}}.
-  defp diff_index(file, pairs), do: %{file => Map.new(pairs)}
+  # diff_index: %{file => %{line => text}} — наличие строки = «в хунке» (инлайн возможен).
+  defp diff_index(file, lines), do: %{file => Map.new(lines, &{&1, "code at #{&1}"})}
 
   describe "summary — каркас" do
-    test "пустые кластеры → заголовок и «замечаний нет», без комментов" do
+    test "пустые кластеры → «No issues found», без инлайнов" do
       out = Render.render([])
       assert out.comments == []
       assert out.summary =~ "Multi-agent review"
@@ -16,7 +16,7 @@ defmodule Aggregator.RenderTest do
       assert out.summary =~ "/rerun-review"
     end
 
-    test "счётчики: находки, кластеры, разбивка по severity" do
+    test "шапка: счётчики находок/кластеров, панель, разбивка severity" do
       clusters =
         Cluster.build([
           finding(agent: "claude", file: "lib/a.ex", line: 1, severity: "P0"),
@@ -25,247 +25,310 @@ defmodule Aggregator.RenderTest do
         ])
 
       out = Render.render(clusters)
-      assert out.summary =~ "3 findings"
-      assert out.summary =~ "2 clusters"
+      assert out.summary =~ "**3 findings** in 2 clusters"
+      assert out.summary =~ "panel 3/3"
       assert out.summary =~ "P0: 1"
       assert out.summary =~ "P2: 1"
     end
 
-    test "advisory по умолчанию → статус «не блокирует»" do
-      out = Render.render(Cluster.build([finding(line: 1)]))
-      assert out.summary =~ "✅ does not block merge"
-    end
+    test "advisory → «does not block» + advisory-футер; block → «blocks merge» + блокирующий футер" do
+      pass = Render.render(Cluster.build([finding(line: 1)]))
+      assert pass.summary =~ "✅ does not block merge"
+      assert pass.summary =~ "advisory — not blocking merge"
 
-    test "решение block → статус «блокирует»; упавшие агенты в баннере" do
-      out =
+      block =
         Render.render(Cluster.build([finding(line: 1, severity: "P0")]), %{
-          failed_agents: ["codex"],
-          panel_size: 2,
-          decision: {:block, "a blocking P0 was found"}
+          decision: {:block, "blocking P0 found"}
         })
 
-      assert out.summary =~ "⛔ blocks merge"
+      assert block.summary =~ "⛔ blocks merge"
+      assert block.summary =~ "blocking this merge (per `fail_on`)"
+    end
+
+    test "баннер упавших агентов виден в summary" do
+      out =
+        Render.render(Cluster.build([finding(line: 1)]), %{
+          failed_agents: ["codex"],
+          panel_size: 2
+        })
+
       assert out.summary =~ "Did not complete: codex"
-      # #5: denominator is the full panel (expected=3), not the agents that ran (2)
-      assert out.summary =~ "1/3"
-      assert out.summary =~ "Panel: 2/3 models"
+      assert out.summary =~ "panel 2/3"
     end
   end
 
-  describe "summary — метки уверенности" do
-    test "единственная модель (consensus 1) → low-confidence + N/M" do
-      out = Render.render(Cluster.build([finding(agent: "claude", line: 1, severity: "P1")]))
-      assert out.summary =~ "low-confidence"
-      assert out.summary =~ "1/3"
-    end
-
-    test "полный консенсус 3/3 → зелёная метка, без low-confidence" do
-      clusters =
-        Cluster.build([
-          finding(agent: "claude", line: 5, severity: "P0"),
-          finding(agent: "codex", line: 5, severity: "P0"),
-          finding(agent: "deepseek", line: 5, severity: "P0")
-        ])
-
-      out = Render.render(clusters)
-      assert out.summary =~ "3/3"
-      refute out.summary =~ "low-confidence"
-    end
-
-    test "категории кластера объединяются" do
-      clusters =
-        Cluster.build([
-          finding(agent: "claude", file: "lib/a.ex", line: 10, category: "bug", severity: "P1"),
-          finding(
-            agent: "codex",
-            file: "lib/a.ex",
-            line: 10,
-            category: "security",
-            severity: "P1"
-          )
-        ])
-
-      assert Render.render(clusters).summary =~ "bug/security"
-    end
-  end
-
-  describe "summary — текст замечания" do
-    test "одобренная правка (messages по id) вытесняет детерминированный текст" do
-      clusters =
-        Cluster.build([finding(agent: "claude", line: 1, severity: "P1", message: "сырой")])
-
-      out = Render.render(clusters, %{messages: %{1 => "причёсанный"}})
-      assert out.summary =~ "причёсанный"
-      refute out.summary =~ "сырой"
-    end
-
-    test "без правок берётся message самой серьёзной находки кластера" do
-      clusters =
-        Cluster.build([
-          finding(agent: "claude", file: "lib/a.ex", line: 10, severity: "P2", message: "мелочь"),
-          finding(agent: "codex", file: "lib/a.ex", line: 10, severity: "P0", message: "критично")
-        ])
-
-      out = Render.render(clusters)
-      assert out.summary =~ "критично"
-    end
-
-    test "многострочный текст схлопывается в одну строку в шапке находки" do
-      clusters = Cluster.build([finding(line: 1, message: "первая\nвторая")])
-      out = Render.render(clusters, %{messages: %{1 => "строка-а\n\nстрока-б"}})
-      refute out.summary =~ "строка-а\n\nстрока-б"
-      assert out.summary =~ "строка-а строка-б"
-    end
-
-    test "html-спецсимволы в тексте экранируются (контекст <summary>/буллет)" do
-      clusters = Cluster.build([finding(line: 1, message: "host='x; rm' и <тег> & co")])
-      out = Render.render(clusters)
-      assert out.summary =~ "&lt;тег&gt;"
-      assert out.summary =~ "&amp; co"
-    end
-
-    test "путь файла экранируется внутри <code> (защита HTML-контекста)" do
-      out = Render.render(Cluster.build([finding(file: "src/<x>.ex", line: 1)]))
-      assert out.summary =~ "<code>src/&lt;x&gt;.ex:1</code>"
-    end
-  end
-
-  describe "консолидированный вид — один коммент, находки плоским списком" do
-    test "inline-комментов больше нет — всё в summary (comments == [])" do
-      clusters = Cluster.build([finding(file: "lib/a.ex", line: 10, suggestion: "x = 1")])
-      out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [{10, "  x = 0"}])})
-      assert out.comments == []
-    end
-
-    test "каждая находка — обычный буллет (и с правкой, и без)" do
-      clusters =
-        Cluster.build([
-          finding(file: "lib/a.ex", line: 10, severity: "P0", suggestion: "x = 1"),
-          finding(file: "lib/b.ex", line: 5, severity: "P2", suggestion: nil, message: "плохо")
-        ])
-
-      out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [{10, "  x = 0"}])})
-      assert out.summary =~ "### Findings"
-      assert out.summary =~ "- **P0**"
-      assert out.summary =~ "- **P2**"
-    end
-
-    test "сколько бы правок ни было — дропдаун ровно один (находки не сворачиваются)" do
-      index =
-        Map.merge(diff_index("lib/a.ex", [{10, "x=0"}]), diff_index("lib/b.ex", [{20, "y=0"}]))
-
-      clusters =
-        Cluster.build([
-          finding(file: "lib/a.ex", line: 10, severity: "P0", suggestion: "x = 1"),
-          finding(file: "lib/b.ex", line: 20, severity: "P1", suggestion: "y = 2")
-        ])
-
-      out = Render.render(clusters, %{diff_index: index})
-      assert out.summary |> String.split("<details>") |> length() == 2
-    end
-  end
-
-  describe "общий дропдаун — код-доказательства + промпт" do
-    test "находка с правкой → внутри дропдауна diff «сломанное → предложение»" do
-      clusters =
-        Cluster.build([finding(file: "lib/a.ex", line: 10, severity: "P0", suggestion: "x = 1")])
-
-      out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [{10, "  x = 0"}])})
-      assert out.summary =~ "<details>"
-      assert out.summary =~ "Code evidence"
-      assert out.summary =~ "Broken code"
-      assert out.summary =~ "```diff"
-      assert out.summary =~ "-   x = 0"
-      assert out.summary =~ "+ x = 1"
-    end
-
-    test "строки нет в диффе → только предложение (+), без сломанной (-)" do
-      clusters = Cluster.build([finding(file: "lib/a.ex", line: 10, suggestion: "x = 1")])
-      out = Render.render(clusters, %{diff_index: %{}})
-      assert out.summary =~ "```diff"
-      assert out.summary =~ "+ x = 1"
-
-      # внутри diff-блока нет удаляемой (-) стороны (буллеты находок «- …» не в счёт)
-      refute out.summary =~ "diff\n- "
-    end
-
-    test "ни одной правки → блока доказательств нет, но промпт есть" do
-      clusters =
-        Cluster.build([finding(file: "lib/a.ex", line: 10, suggestion: nil, message: "плохо")])
-
-      out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [{10, "code"}])})
-      refute out.summary =~ "```diff"
-      refute out.summary =~ "Broken code"
-      assert out.summary =~ "#### Prompt"
-    end
-
-    test "suggestion с тройными бэктиками → забор диффа длиннее (блок не рвётся)" do
-      code = "```\nIO.puts(1)\n```"
-      clusters = Cluster.build([finding(file: "lib/a.ex", line: 10, suggestion: code)])
-      out = Render.render(clusters, %{diff_index: %{}})
-      assert out.summary =~ "````diff"
-      assert out.summary =~ "IO.puts(1)"
-    end
-
-    test "готовый текст-промпт перечисляет все находки" do
+  describe "индекс находок (свёрнутый дропдаун)" do
+    test "находки — в <details> Findings, по строке на кластер" do
       clusters =
         Cluster.build([
           finding(
+            agent: "claude",
             file: "lib/a.ex",
             line: 10,
             severity: "P0",
-            message: "инъекция",
-            suggestion: "safe()"
+            message: "Bug one."
           ),
-          finding(file: "lib/b.ex", line: 5, severity: "P1", message: "деление", suggestion: nil)
+          finding(agent: "codex", file: "lib/b.ex", line: 20, severity: "P2", message: "Nit two.")
         ])
 
-      out = Render.render(clusters, %{diff_index: %{}})
-      assert out.summary =~ "AI-agent prompt"
-      assert out.summary =~ "```text"
-      assert out.summary =~ "1. lib/a.ex:10"
-      assert out.summary =~ "2. lib/b.ex:5"
-      assert out.summary =~ "инъекция"
-      assert out.summary =~ "suggestion:"
-      assert out.summary =~ "safe()"
-    end
-
-    test "пустые кластеры → дропдауна нет" do
-      out = Render.render([]).summary
-      refute out =~ "AI-agent prompt"
-      refute out =~ "<details>"
+      out = Render.render(clusters)
+      assert out.summary =~ "<summary>🔎 Findings (2)</summary>"
+      assert out.summary =~ "<code>lib/a.ex:10</code>"
+      assert out.summary =~ "Bug one."
     end
   end
 
-  describe "лимит размера (защита от 422 GitHub)" do
-    test "большой PR не пробивает лимит — деградирует/усекается, обзор не теряется" do
+  describe "консенсус-бейдж — знаменатель = expected (#5)" do
+    test "полный консенсус 3/3 → зелёный; одиночка → 1/3 low-confidence" do
+      three =
+        Cluster.build(
+          for a <- ~w(claude codex deepseek),
+              do: finding(agent: a, file: "lib/a.ex", line: 5, severity: "P0")
+        )
+
+      assert Render.render(three).summary =~ "🟢 3/3"
+
+      one = Cluster.build([finding(agent: "claude", line: 1, severity: "P1")])
+      out = Render.render(one)
+      assert out.summary =~ "🔴 1/3"
+      assert out.summary =~ "low-confidence"
+    end
+
+    test "упавший агент: согласие двух → 2/3 жёлтый (не 2/2)" do
+      clusters =
+        Cluster.build([
+          finding(agent: "claude", file: "lib/a.ex", line: 5, severity: "P0"),
+          finding(agent: "codex", file: "lib/a.ex", line: 5, severity: "P0")
+        ])
+
+      out = Render.render(clusters, %{panel_size: 2, expected: 3, failed_agents: ["deepseek"]})
+      assert out.summary =~ "🟡 2/3"
+      refute out.summary =~ "2/2"
+    end
+  end
+
+  describe "инлайн-комменты (in-hunk) vs Comments outside diff" do
+    test "находка на строке в хунке → инлайн-коммент path/line/body со всеми частями" do
+      clusters =
+        Cluster.build([
+          finding(
+            agent: "claude",
+            file: "lib/a.ex",
+            line: 10,
+            severity: "P0",
+            category: "security",
+            message: "SQLi here.",
+            suggestion: "safe()"
+          )
+        ])
+
+      out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [10])})
+      assert [%{path: "lib/a.ex", line: 10, body: body}] = out.comments
+      assert body =~ "_🔴 P0_"
+      assert body =~ "_🔒 security_"
+      assert body =~ "**SQLi here.**"
+      assert body =~ "found by: claude"
+      assert body =~ "<summary>📝 Committable suggestion</summary>"
+      assert body =~ "```suggestion\nsafe()\n```"
+      assert body =~ "<summary>🤖 Prompt for AI agent</summary>"
+    end
+
+    test "находка вне диффа → НЕ инлайн, а в дропдауне Comments outside diff" do
+      clusters =
+        Cluster.build([
+          finding(
+            file: "lib/a.ex",
+            line: 999,
+            severity: "P1",
+            message: "Off diff.",
+            suggestion: "x"
+          )
+        ])
+
+      out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [10])})
+      assert out.comments == []
+      assert out.summary =~ "Comments outside the diff (1)"
+      assert out.summary =~ "Off diff."
+    end
+
+    test "часть инлайн, часть вне диффа — разводятся правильно" do
+      clusters =
+        Cluster.build([
+          finding(
+            agent: "claude",
+            file: "lib/a.ex",
+            line: 10,
+            severity: "P0",
+            message: "In hunk."
+          ),
+          finding(
+            agent: "claude",
+            file: "lib/a.ex",
+            line: 999,
+            severity: "P2",
+            message: "Out hunk."
+          )
+        ])
+
+      out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [10])})
+      assert length(out.comments) == 1
+      assert hd(out.comments).line == 10
+      assert out.summary =~ "Comments outside the diff (1)"
+    end
+  end
+
+  describe "committable suggestion" do
+    test "без suggestion → инлайн без блока правки, но с промптом" do
+      clusters =
+        Cluster.build([finding(file: "lib/a.ex", line: 10, suggestion: nil, message: "No fix.")])
+
+      out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [10])})
+      body = hd(out.comments).body
+      refute body =~ "Committable suggestion"
+      assert body =~ "Prompt for AI agent"
+    end
+
+    test "suggestion с ```-забором → не нативный suggestion (обычный код-блок, забор длиннее)" do
+      code = "```\nIO.puts(1)\n```"
+      clusters = Cluster.build([finding(file: "lib/a.ex", line: 10, suggestion: code)])
+      out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [10])})
+      body = hd(out.comments).body
+      refute body =~ "```suggestion"
+      assert body =~ "````"
+      assert body =~ "IO.puts(1)"
+    end
+  end
+
+  describe "экранирование и oneline" do
+    test "html-спецсимволы в тексте экранируются (заголовок и индекс)" do
+      clusters = Cluster.build([finding(file: "src/<x>.ex", line: 1, message: "host=<tag> & co")])
+      out = Render.render(clusters, %{diff_index: diff_index("src/<x>.ex", [1])})
+      body = hd(out.comments).body
+      assert body =~ "&lt;tag&gt;"
+      assert body =~ "&amp; co"
+      assert out.summary =~ "src/&lt;x&gt;.ex"
+    end
+
+    test "многострочный текст схлопывается в одну строку" do
+      clusters = Cluster.build([finding(line: 1, message: "first part")])
+      out = Render.render(clusters, %{messages: %{1 => "line a\n\nline b"}})
+      refute out.summary =~ "line a\n\nline b"
+      assert out.summary =~ "line a line b"
+    end
+  end
+
+  describe "правка Polish (messages по id)" do
+    test "одобренная правка вытесняет детерминированный текст" do
+      clusters =
+        Cluster.build([finding(agent: "claude", line: 1, severity: "P1", message: "raw")])
+
+      out = Render.render(clusters, %{messages: %{1 => "polished text."}})
+      assert out.summary =~ "polished text."
+      refute out.summary =~ "raw"
+    end
+  end
+
+  describe "фиксы ревью PR3" do
+    test "A: правка НЕ с якорной строки → не committable (защита от коммита не в ту строку)" do
+      clusters =
+        Cluster.build([
+          finding(agent: "claude", file: "lib/a.ex", line: 10, severity: "P0", message: "Bug."),
+          finding(
+            agent: "codex",
+            file: "lib/a.ex",
+            line: 12,
+            severity: "P0",
+            message: "Bug.",
+            suggestion: "fix_line_12()"
+          )
+        ])
+
+      out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [10, 11, 12])})
+      assert [%{line: 10, body: body}] = out.comments
+      refute body =~ "```suggestion"
+      assert body =~ "not auto-committable"
+      # правка не теряется — уходит в промпт для агента
+      assert body =~ "fix_line_12()"
+    end
+
+    test "A: правка С якорной строки → committable" do
+      clusters =
+        Cluster.build([
+          finding(
+            agent: "claude",
+            file: "lib/a.ex",
+            line: 10,
+            severity: "P0",
+            message: "Bug.",
+            suggestion: "fixed()"
+          ),
+          finding(agent: "codex", file: "lib/a.ex", line: 12, severity: "P0", message: "Bug.")
+        ])
+
+      out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [10, 11, 12])})
+      assert [%{line: 10, body: body}] = out.comments
+      assert body =~ "```suggestion\nfixed()\n```"
+    end
+
+    test "B: сокращение (e.g.) не рвёт заголовок — весь текст остаётся целым" do
+      clusters =
+        Cluster.build([finding(line: 1, message: "Avoid magic numbers e.g. 42 in the loop.")])
+
+      assert Render.render(clusters).summary =~ "Avoid magic numbers e.g. 42 in the loop."
+    end
+
+    test "B: настоящая граница предложения делит заголовок и прозу" do
+      clusters =
+        Cluster.build([
+          finding(file: "lib/a.ex", line: 10, message: "Title here. Prose follows.")
+        ])
+
+      body =
+        hd(Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [10])}).comments).body
+
+      assert body =~ "**Title here.**"
+      assert body =~ "Prose follows."
+    end
+
+    test "C: _ и * в тексте экранируются (нет паразитного курсива)" do
+      clusters =
+        Cluster.build([finding(file: "lib/a.ex", line: 10, message: "Use foo_bar not foo*baz.")])
+
+      body =
+        hd(Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [10])}).comments).body
+
+      assert body =~ "foo\\_bar"
+      assert body =~ "foo\\*baz"
+    end
+
+    test "G: message из пробелов → плейсхолдер, не пустой ****" do
+      clusters = Cluster.build([finding(file: "lib/a.ex", line: 10, message: "   ")])
+
+      body =
+        hd(Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [10])}).comments).body
+
+      assert body =~ "(no description)"
+      refute body =~ "****"
+    end
+  end
+
+  describe "лимит размера summary (защита от 422 GitHub)" do
+    test "большой PR → summary не пробивает лимит, обзор не теряется целиком" do
       big =
-        for i <- 1..200 do
+        for i <- 1..300 do
           finding(
             file: "lib/f#{i}.ex",
             line: i,
             severity: "P1",
-            message: String.duplicate("очень длинное описание проблемы ", 30),
+            message: String.duplicate("long problem description ", 30),
             suggestion: String.duplicate("x = #{i}\n", 8)
           )
         end
 
+      # без diff_index → все находки «вне диффа» → крупная секция → деградация/усечение
       out = Render.render(Cluster.build(big))
       assert String.length(out.summary) <= 60_000
-      assert out.summary =~ "limit"
-
-      # шапка и сами находки всё равно на месте — обзор не пропал целиком
       assert out.summary =~ "Multi-agent review"
-      assert out.summary =~ "### Findings"
-    end
-
-    test "обычный PR: полный вид влезает — без пометок о деградации, с промптом" do
-      out =
-        Render.render(Cluster.build([finding(file: "lib/a.ex", line: 1, suggestion: "x = 1")]))
-
-      refute out.summary =~ "exceeded"
-      refute out.summary =~ "truncated"
-      assert out.summary =~ "AI-agent prompt"
     end
   end
 end
