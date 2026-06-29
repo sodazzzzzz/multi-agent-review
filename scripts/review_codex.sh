@@ -17,11 +17,12 @@ out="${2:?out file required}"
 call_codex() {
   local msg rc
   msg="$(mktemp)"
-  # -s read-only + -a never: ревью НЕ правит файлы и не виснет на аппруве. Инструкция —
+  # -s read-only: ревью НЕ правит файлы; codex exec неинтерактивен и в read-only не спрашивает
+  # аппрув (флаг -a/--ask-for-approval — только у интерактивного codex, в exec он ошибка). Инструкция —
   # аргументом (мал), большой diff — на stdin как доп. контекст (мимо argv-лимита). -o
   # пишет ТОЛЬКО финальное сообщение модели в файл (stdout у codex — шумный формат, гасим).
   # stderr НЕ глушим — причина падения видна в логе джоба.
-  local args=(exec -s read-only -a never --skip-git-repo-check --ephemeral -o "$msg")
+  local args=(exec -s read-only --skip-git-repo-check --ephemeral -o "$msg")
   [ -n "${CODEX_MODEL:-}" ] && args+=(--model "$CODEX_MODEL")
   args+=("$(review_instruction)")
 
