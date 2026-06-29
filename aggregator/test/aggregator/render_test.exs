@@ -11,8 +11,8 @@ defmodule Aggregator.RenderTest do
     test "пустые кластеры → заголовок и «замечаний нет», без комментов" do
       out = Render.render([])
       assert out.comments == []
-      assert out.summary =~ "Мульти-агентное ревью"
-      assert out.summary =~ "Замечаний нет"
+      assert out.summary =~ "Multi-agent review"
+      assert out.summary =~ "No issues found"
       assert out.summary =~ "/rerun-review"
     end
 
@@ -25,15 +25,15 @@ defmodule Aggregator.RenderTest do
         ])
 
       out = Render.render(clusters)
-      assert out.summary =~ "3 находок"
-      assert out.summary =~ "2 кластеров"
+      assert out.summary =~ "3 findings"
+      assert out.summary =~ "2 clusters"
       assert out.summary =~ "P0: 1"
       assert out.summary =~ "P2: 1"
     end
 
     test "advisory по умолчанию → статус «не блокирует»" do
       out = Render.render(Cluster.build([finding(line: 1)]))
-      assert out.summary =~ "✅ не блокирует merge"
+      assert out.summary =~ "✅ does not block merge"
     end
 
     test "решение block → статус «блокирует»; упавшие агенты в баннере" do
@@ -41,12 +41,14 @@ defmodule Aggregator.RenderTest do
         Render.render(Cluster.build([finding(line: 1, severity: "P0")]), %{
           failed_agents: ["codex"],
           panel_size: 2,
-          decision: {:block, "найден блокирующий P0"}
+          decision: {:block, "a blocking P0 was found"}
         })
 
-      assert out.summary =~ "⛔ блокирует merge"
-      assert out.summary =~ "Не отработали: codex"
-      assert out.summary =~ "1/2"
+      assert out.summary =~ "⛔ blocks merge"
+      assert out.summary =~ "Did not complete: codex"
+      # #5: denominator is the full panel (expected=3), not the agents that ran (2)
+      assert out.summary =~ "1/3"
+      assert out.summary =~ "Panel: 2/3 models"
     end
   end
 
@@ -143,7 +145,7 @@ defmodule Aggregator.RenderTest do
         ])
 
       out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [{10, "  x = 0"}])})
-      assert out.summary =~ "### Находки"
+      assert out.summary =~ "### Findings"
       assert out.summary =~ "- **P0**"
       assert out.summary =~ "- **P2**"
     end
@@ -170,8 +172,8 @@ defmodule Aggregator.RenderTest do
 
       out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [{10, "  x = 0"}])})
       assert out.summary =~ "<details>"
-      assert out.summary =~ "Код-доказательства"
-      assert out.summary =~ "Сломанный код"
+      assert out.summary =~ "Code evidence"
+      assert out.summary =~ "Broken code"
       assert out.summary =~ "```diff"
       assert out.summary =~ "-   x = 0"
       assert out.summary =~ "+ x = 1"
@@ -193,8 +195,8 @@ defmodule Aggregator.RenderTest do
 
       out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [{10, "code"}])})
       refute out.summary =~ "```diff"
-      refute out.summary =~ "Сломанный код"
-      assert out.summary =~ "#### Промпт"
+      refute out.summary =~ "Broken code"
+      assert out.summary =~ "#### Prompt"
     end
 
     test "suggestion с тройными бэктиками → забор диффа длиннее (блок не рвётся)" do
@@ -219,18 +221,18 @@ defmodule Aggregator.RenderTest do
         ])
 
       out = Render.render(clusters, %{diff_index: %{}})
-      assert out.summary =~ "для ИИ-агента"
+      assert out.summary =~ "AI-agent prompt"
       assert out.summary =~ "```text"
       assert out.summary =~ "1. lib/a.ex:10"
       assert out.summary =~ "2. lib/b.ex:5"
       assert out.summary =~ "инъекция"
-      assert out.summary =~ "предложение:"
+      assert out.summary =~ "suggestion:"
       assert out.summary =~ "safe()"
     end
 
     test "пустые кластеры → дропдауна нет" do
       out = Render.render([]).summary
-      refute out =~ "для ИИ-агента"
+      refute out =~ "AI-agent prompt"
       refute out =~ "<details>"
     end
   end
@@ -250,20 +252,20 @@ defmodule Aggregator.RenderTest do
 
       out = Render.render(Cluster.build(big))
       assert String.length(out.summary) <= 60_000
-      assert out.summary =~ "лимит"
+      assert out.summary =~ "limit"
 
       # шапка и сами находки всё равно на месте — обзор не пропал целиком
-      assert out.summary =~ "Мульти-агентное ревью"
-      assert out.summary =~ "### Находки"
+      assert out.summary =~ "Multi-agent review"
+      assert out.summary =~ "### Findings"
     end
 
     test "обычный PR: полный вид влезает — без пометок о деградации, с промптом" do
       out =
         Render.render(Cluster.build([finding(file: "lib/a.ex", line: 1, suggestion: "x = 1")]))
 
-      refute out.summary =~ "не уместил"
-      refute out.summary =~ "обрезан"
-      assert out.summary =~ "для ИИ-агента"
+      refute out.summary =~ "exceeded"
+      refute out.summary =~ "truncated"
+      assert out.summary =~ "AI-agent prompt"
     end
   end
 end

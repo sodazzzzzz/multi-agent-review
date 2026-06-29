@@ -79,14 +79,14 @@ defmodule Aggregator.Render do
 
   defp assemble(clusters, ctx, extras) do
     [
-      "## 🔍 Мульти-агентное ревью",
+      "## 🔍 Multi-agent review",
       overview(clusters, ctx),
       failed_banner(ctx.failed_agents),
       gate_line(ctx.decision),
       size_note(extras, clusters),
       findings_section(clusters, ctx),
       if(extras, do: action_section(clusters, ctx)),
-      footer()
+      footer(ctx.decision)
     ]
     |> Enum.reject(&blank?/1)
     |> Enum.join("\n\n")
@@ -98,10 +98,10 @@ defmodule Aggregator.Render do
 
   defp size_note(false, _clusters),
     do:
-      "> ⚠️ Доказательства и промпт свёрнуты — полный вывод не уместился в лимит GitHub " <>
-        "(слишком много находок). Находки — списком ниже."
+      "> ⚠️ Evidence and the fix-all prompt are collapsed — the full output exceeded GitHub's " <>
+        "comment limit (too many findings). The findings are listed below."
 
-  @cut_note "\n\n> ⚠️ …обзор обрезан по лимиту GitHub (слишком много находок)."
+  @cut_note "\n\n> ⚠️ …review truncated due to GitHub's comment limit (too many findings)."
 
   # Последний предохранитель: даже компактный вид не влез — режем по границе строки.
   # Резервируем РОВНО длину приписываемой пометки (а не «магические» 60), иначе
@@ -119,8 +119,8 @@ defmodule Aggregator.Render do
   defp overview(clusters, ctx) do
     findings = clusters |> Enum.map(&length(&1.items)) |> Enum.sum()
 
-    "Панель: #{ctx.panel_size} из #{ctx.expected} моделей · " <>
-      "#{findings} находок · #{length(clusters)} кластеров · #{breakdown(clusters)}"
+    "Panel: #{ctx.panel_size}/#{ctx.expected} models · " <>
+      "#{findings} findings · #{length(clusters)} clusters · #{breakdown(clusters)}"
   end
 
   defp breakdown(clusters) do
@@ -131,21 +131,21 @@ defmodule Aggregator.Render do
   defp failed_banner([]), do: nil
 
   defp failed_banner(agents),
-    do: "> ⚠️ Не отработали: #{Enum.join(agents, ", ")} — ревью по оставшимся моделям."
+    do: "> ⚠️ Did not complete: #{Enum.join(agents, ", ")} — review based on the remaining models."
 
-  defp gate_line({:pass, reason}), do: "**Статус:** ✅ не блокирует merge — #{reason}"
-  defp gate_line({:block, reason}), do: "**Статус:** ⛔ блокирует merge — #{reason}"
+  defp gate_line({:pass, reason}), do: "**Status:** ✅ does not block merge — #{reason}"
+  defp gate_line({:block, reason}), do: "**Status:** ⛔ blocks merge — #{reason}"
 
   # --- список находок ---
 
   # Все находки — обычными буллетами, без дропдаунов. По решению продукта код-диффы и
   # промпт уходят в отдельный общий дропдаун, а сам список находок остаётся плоским и
   # легко сканируемым.
-  defp findings_section([], _ctx), do: "✅ Замечаний нет."
+  defp findings_section([], _ctx), do: "✅ No issues found."
 
   defp findings_section(clusters, ctx) do
     bullets = Enum.map(clusters, &("- " <> headline(&1, ctx)))
-    Enum.join(["### Находки (по консенсусу)" | bullets], "\n")
+    Enum.join(["### Findings (by consensus)" | bullets], "\n")
   end
 
   defp details_block(summary_line, body) do
@@ -194,7 +194,7 @@ defmodule Aggregator.Render do
       |> Enum.reject(&blank?/1)
       |> Enum.join("\n\n")
 
-    details_block("🛠 Код-доказательства и промпт для ИИ-агента — исправить все находки", body)
+    details_block("🛠 Code evidence and an AI-agent prompt to fix all findings", body)
   end
 
   # «Сломанный код → предложенная правка» по каждой находке, у которой есть правка.
@@ -210,7 +210,7 @@ defmodule Aggregator.Render do
 
       pairs ->
         entries = Enum.map(pairs, fn {c, diff} -> evidence_entry(c, ctx, diff) end)
-        Enum.join(["#### Сломанный код → предложенная правка" | entries], "\n\n")
+        Enum.join(["#### Broken code → suggested fix" | entries], "\n\n")
     end
   end
 
@@ -224,14 +224,14 @@ defmodule Aggregator.Render do
   defp prompt_block(clusters, ctx) do
     prompt = fix_all_prompt(clusters, ctx)
     fence = fence_for([prompt])
-    "#### Промпт\n\n#{fence}text\n#{prompt}\n#{fence}"
+    "#### Prompt\n\n#{fence}text\n#{prompt}\n#{fence}"
   end
 
   defp fix_all_prompt(clusters, ctx) do
     intro =
-      "Исправь перечисленные ниже проблемы в коде. Вноси минимальные точечные правки, " <>
-        "сохраняй поведение и стиль, не трогай несвязанный код. Для каждой — файл:строка, " <>
-        "суть и направление правки."
+      "Fix the problems listed below. Make minimal, targeted changes; preserve behavior " <>
+        "and style; do not touch unrelated code. For each: file:line, the issue, and the " <>
+        "direction of the fix."
 
     items =
       clusters
@@ -246,22 +246,32 @@ defmodule Aggregator.Render do
 
     case suggestion(c) do
       nil -> head
-      fix -> "#{head}\n   предложение:\n#{indent(fix)}"
+      fix -> "#{head}\n   suggestion:\n#{indent(fix)}"
     end
   end
 
   defp indent(text),
     do: text |> String.split(["\r\n", "\n"]) |> Enum.map_join("\n", &"     #{&1}")
 
-  defp footer do
-    "<sub>Перезапуск — команда `/rerun-review` в комментарии к PR. " <>
-      "Это независимая ИИ-панель: рекомендации, не блокер (пока не включён `fail_on`).</sub>"
+  # Decision-aware: must not claim "advisory" when fail_on is actually blocking this
+  # merge (and vice versa). Stance is derived from the gate decision, not hard-coded.
+  defp footer({decision, _reason}) do
+    stance =
+      case decision do
+        :block -> "blocking this merge (per `fail_on`)"
+        :pass -> "advisory — not blocking merge"
+      end
+
+    "<sub>Independent AI panel · #{stance}. Re-run with `/rerun-review` in a PR comment.</sub>"
   end
 
   # --- общие хелперы ---
 
+  # Denominator is the FULL panel (`expected`), not the agents that actually ran:
+  # honest coverage. With a failed agent the max consensus is < expected → never
+  # green (yellow at best); the failed-agent banner explains the missing vote.
   defp badge(%Cluster{severity: sev, consensus: n} = c, ctx),
-    do: "**#{sev}** · #{confidence(n, ctx.panel_size)} · #{category(c)}"
+    do: "**#{sev}** · #{confidence(n, ctx.expected)} · #{category(c)}"
 
   defp confidence(1, panel), do: "🔴 1/#{panel} · low-confidence"
   defp confidence(n, panel) when n >= panel, do: "🟢 #{n}/#{panel}"
@@ -298,7 +308,7 @@ defmodule Aggregator.Render do
 
   defp deterministic_message(%Cluster{items: items}) do
     case Enum.reject(items, &is_nil(&1.message)) do
-      [] -> "(без описания)"
+      [] -> "(no description)"
       msgs -> msgs |> Enum.min_by(&Consensus.severity_rank(&1.severity)) |> Map.get(:message)
     end
   end

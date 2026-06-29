@@ -63,11 +63,11 @@ defmodule Aggregator.Polish do
   end
 
   @prompt_preamble """
-  Ты — редактор замечаний код-ревью. Ниже JSON-массив кластеров: у каждого стабильный
-  id и замороженные факты (file, line, severity, consensus) плюс сырые сообщения агентов.
-  Для КАЖДОГО кластера верни одно улучшенное сообщение: 1–3 предложения, ясно и по делу,
-  на русском, без markdown и без префиксов severity. Факты НЕ меняй.
-  Ответь СТРОГО JSON-массивом вида [{"id": <число>, "message": "<текст>"}] и ничем больше.
+  You are an editor of code-review findings. Below is a JSON array of clusters: each has a
+  stable id and frozen facts (file, line, severity, consensus) plus the raw agent messages.
+  For EACH cluster return one improved message: 1–3 sentences, clear and to the point, in
+  English, without markdown and without a severity prefix. Do NOT change the facts.
+  Reply STRICTLY with a JSON array of the form [{"id": <number>, "message": "<text>"}] and nothing else.
   """
 
   @doc """

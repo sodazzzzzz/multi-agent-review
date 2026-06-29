@@ -104,8 +104,9 @@ defmodule Aggregator.CLITest do
 
     # Консолидировано: причёсанный текст (override), упавший агент, метка панели, файл:строка
     assert summary =~ "причёсано P0"
-    assert summary =~ "Не отработали: deepseek"
-    assert summary =~ "2/2"
+    assert summary =~ "Did not complete: deepseek"
+    # #5: 2 of 3 expected agents agree (deepseek absent) → 2/3, not 2/2
+    assert summary =~ "2/3"
     assert summary =~ "lib/a.ex:10"
 
     # Сама находка — буллетом в списке; правка ушла в общий дропдаун: diff
@@ -116,7 +117,7 @@ defmodule Aggregator.CLITest do
     assert summary =~ "+ x = 1"
 
     # И готовый промпт «исправь все находки» в том же дропдауне
-    assert summary =~ "для ИИ-агента"
+    assert summary =~ "AI-agent prompt"
 
     # GITHUB_OUTPUT
     output = File.read!(out_path)
@@ -129,7 +130,7 @@ defmodule Aggregator.CLITest do
        %{cfg: cfg, client: client} do
     assert CLI.run(client, %{cfg | fail_on: "p0"}) == 1
 
-    assert gather_summary()["body"] =~ "⛔ блокирует merge"
+    assert gather_summary()["body"] =~ "⛔ blocks merge"
   end
 
   test "нет diff_path → нет inline-комментов, постится только summary",
@@ -153,7 +154,7 @@ defmodule Aggregator.CLITest do
 
     assert_received {:posted, url, body}
     assert String.contains?(url, "/issues/")
-    assert (body |> IO.iodata_to_binary() |> Jason.decode!())["body"] =~ "Замечаний нет"
+    assert (body |> IO.iodata_to_binary() |> Jason.decode!())["body"] =~ "No issues found"
 
     # пустой список комментов → POST на /pulls/.../reviews не отправляется
     refute_received {:posted, _other, _b}

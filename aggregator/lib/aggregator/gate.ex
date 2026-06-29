@@ -30,18 +30,18 @@ defmodule Aggregator.Gate do
     * `:consensus_p0` — `:block`, если есть `P0`-кластер с консенсусом ≥ 2.
   """
   @spec decide([Cluster.t()], mode()) :: decision()
-  def decide(_clusters, :none), do: {:pass, "advisory — блокировка отключена (fail_on: none)"}
+  def decide(_clusters, :none), do: {:pass, "blocking disabled (fail_on: none)"}
 
   def decide(clusters, :p0) do
     if Enum.any?(clusters, &(&1.severity == "P0")),
-      do: {:block, "найден блокирующий P0"},
-      else: {:pass, "P0 не найден"}
+      do: {:block, "blocking P0 found"},
+      else: {:pass, "no P0 found"}
   end
 
   def decide(clusters, :consensus_p0) do
     if Enum.any?(clusters, &(&1.severity == "P0" and &1.consensus >= 2)),
-      do: {:block, "найден P0 с консенсусом ≥ 2 моделей"},
-      else: {:pass, "нет P0 с консенсусом ≥ 2"}
+      do: {:block, "P0 with consensus from ≥ 2 models found"},
+      else: {:pass, "no P0 with consensus ≥ 2"}
   end
 
   @doc "Exit-код для CLI: 0 = pass, 1 = block."
