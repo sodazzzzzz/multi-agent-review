@@ -86,10 +86,16 @@ jobs:
         with:
           ref: ${{ needs.gate.outputs.base_ref }}
           fetch-depth: 0
-      - name: Fetch PR head
+      - name: Fetch PR head and base
         env:
           PR: ${{ needs.gate.outputs.pr }}
-        run: git fetch --no-tags origin "refs/pull/${PR}/head"
+          BASE: ${{ needs.gate.outputs.base }}
+        run: |
+          git fetch --no-tags origin "refs/pull/${PR}/head"
+          # base.sha обычно уже в истории базовой ветки (fetch-depth: 0). Если её
+          # форс-пушнули и коммит осиротел — тянем явно (best-effort; GitHub отдаёт
+          # достижимые SHA). Иначе three-dot diff упал бы на «not a valid object».
+          git fetch --no-tags origin "$BASE" || true
       - name: Построить diff
         env:
           BASE: ${{ needs.gate.outputs.base }}
