@@ -27,8 +27,7 @@ defmodule Aggregator.CLITest do
     File.write!(out, Jason.encode!(%{"type" => "result", "result" => inner}))
     bin = Path.join(dir, "fake_claude.sh")
 
-    # Путь в кавычки: tmp_dir ExUnit включает имя теста, где бывают скобки/пробелы —
-    # без кавычек sh сломался бы на них (и причёсывание молча отвалилось бы).
+    # Путь в кавычки: tmp_dir ExUnit включает имя теста, где бывают скобки/пробелы.
     File.write!(bin, "#!/bin/sh\ncat '#{out}'\n")
     File.chmod!(bin, 0o755)
     bin
@@ -51,14 +50,19 @@ defmodule Aggregator.CLITest do
     Github.new(owner: "o", repo: "r", pr: 7, token: "t", req_options: [adapter: adapter])
   end
 
-  # Теперь ревью — ОДИН issue-комментарий (inline-комментов к строкам нет).
-  # Возвращает распарсенное тело summary, проверив, что второго постинга не было.
-  defp gather_summary do
-    assert_received {:posted, url, body}
-    assert String.contains?(url, "/issues/")
-    refute_received {:posted, _u, _b}
-    body |> IO.iodata_to_binary() |> Jason.decode!()
+  # Собрать ВСЕ посты прогона (review к /pulls/.../reviews + summary к /issues/.../comments).
+  defp gather_posts, do: collect([])
+
+  defp collect(acc) do
+    receive do
+      {:posted, url, body} ->
+        collect([%{url: url, json: body |> IO.iodata_to_binary() |> Jason.decode!()} | acc])
+    after
+      0 -> acc
+    end
   end
+
+  defp find_post(posts, frag), do: Enum.find(posts, &String.contains?(&1.url, frag))
 
   setup %{tmp_dir: dir} do
     write_review(
@@ -96,28 +100,31 @@ defmodule Aggregator.CLITest do
     %{cfg: cfg, out_path: out_path, client: capturing_client()}
   end
 
-  test "end-to-end: ОДИН консолидированный коммент (правка в дропдауне) + причёсанный текст, advisory → exit 0",
+  test "end-to-end: инлайн-коммент (на строке в хунке) + обзор с причёсанным текстом, advisory → exit 0",
        %{cfg: cfg, out_path: out_path, client: client} do
     assert CLI.run(client, cfg) == 0
 
-    summary = gather_summary()["body"]
+    posts = gather_posts()
 
-    # Консолидировано: причёсанный текст (override), упавший агент, метка панели, файл:строка
+    # Инлайн-ревью: один коммент на строку 10 (claude@10 и codex@11 в одном кластере, line=10).
+    review = find_post(posts, "/pulls/")
+    assert [comment] = review.json["comments"]
+    assert comment["path"] == "lib/a.ex"
+    assert comment["line"] == 10
+    assert comment["side"] == "RIGHT"
+
+    # тело инлайна: причёсанный заголовок, found-by, однокликовый suggestion, промпт
+    assert comment["body"] =~ "причёсано P0"
+    assert comment["body"] =~ "found by: claude, codex"
+    assert comment["body"] =~ "```suggestion\nx = 1\n```"
+    assert comment["body"] =~ "Prompt for AI agent"
+
+    # Обзор-коммент: индекс с причёсанным текстом, панель 2/3, упавший агент, консенсус.
+    summary = find_post(posts, "/issues/").json["body"]
     assert summary =~ "причёсано P0"
+    assert summary =~ "panel 2/3"
     assert summary =~ "Did not complete: deepseek"
-    # #5: 2 of 3 expected agents agree (deepseek absent) → 2/3, not 2/2
-    assert summary =~ "2/3"
-    assert summary =~ "lib/a.ex:10"
-
-    # Сама находка — буллетом в списке; правка ушла в общий дропдаун: diff
-    # «сломанное → предложение» внутри того же коммента
-    assert summary =~ "<details>"
-    assert summary =~ "```diff"
-    assert summary =~ "- строка 10 в хунке"
-    assert summary =~ "+ x = 1"
-
-    # И готовый промпт «исправь все находки» в том же дропдауне
-    assert summary =~ "AI-agent prompt"
+    assert summary =~ "🟡 2/3"
 
     # GITHUB_OUTPUT
     output = File.read!(out_path)
@@ -126,37 +133,36 @@ defmodule Aggregator.CLITest do
     assert output =~ "summary_url=HTML_URL"
   end
 
-  test "fail_on=p0 + P0-кластер → exit 1 и статус «блокирует»",
+  test "fail_on=p0 + P0-кластер → exit 1 и статус «blocks merge»",
        %{cfg: cfg, client: client} do
     assert CLI.run(client, %{cfg | fail_on: "p0"}) == 1
 
-    assert gather_summary()["body"] =~ "⛔ blocks merge"
+    summary = find_post(gather_posts(), "/issues/").json["body"]
+    assert summary =~ "⛔ blocks merge"
   end
 
-  test "нет diff_path → нет inline-комментов, постится только summary",
+  test "нет diff_path → нет инлайнов (находки в «outside diff»), постится только обзор",
        %{cfg: cfg, client: client} do
     assert CLI.run(client, %{cfg | diff_path: nil}) == 0
 
-    assert_received {:posted, url, body}
-    assert String.contains?(url, "/issues/")
+    posts = gather_posts()
 
-    # находка всё равно в сводке, просто без однокликовой правки
-    assert (body |> IO.iodata_to_binary() |> Jason.decode!())["body"] =~ "lib/a.ex:10"
-    refute_received {:posted, _u, _b}
+    # ни одной строки в диффе → review-POST не уходит, только обзор
+    assert find_post(posts, "/pulls/") == nil
+    summary = find_post(posts, "/issues/").json["body"]
+    assert summary =~ "Comments outside the diff"
+    assert summary =~ "lib/a.ex:10"
   end
 
-  test "пустые артефакты → «замечаний нет», exit 0, постится только summary (review-POST не уходит)",
+  test "пустые артефакты → «No issues found», exit 0, только обзор (review-POST не уходит)",
        %{cfg: cfg, client: client} do
     empty = Path.join(Path.dirname(cfg.reviews_dir), "empty_reviews")
     File.mkdir_p!(empty)
 
     assert CLI.run(client, %{cfg | reviews_dir: empty}) == 0
 
-    assert_received {:posted, url, body}
-    assert String.contains?(url, "/issues/")
-    assert (body |> IO.iodata_to_binary() |> Jason.decode!())["body"] =~ "No issues found"
-
-    # пустой список комментов → POST на /pulls/.../reviews не отправляется
-    refute_received {:posted, _other, _b}
+    posts = gather_posts()
+    assert find_post(posts, "/pulls/") == nil
+    assert find_post(posts, "/issues/").json["body"] =~ "No issues found"
   end
 end
