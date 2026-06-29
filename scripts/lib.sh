@@ -11,19 +11,20 @@
 # лимит длины ОДНОГО argv-аргумента (Linux MAX_ARG_STRLEN ≈ 128К): дифф идёт мимо argv.
 review_instruction() {
   cat <<'PROMPT'
-Ты — строгий код-ревьюер. Тебе дан unified diff пулл-реквеста. Найди РЕАЛЬНЫЕ проблемы
-(bug, security, performance, design, test, style) во ВНЕСЁННЫХ изменениях.
+You are a strict code reviewer. You are given a unified diff of a pull request. Find REAL
+problems (bug, security, performance, design, test, style) in the INTRODUCED changes.
 
-Ответь СТРОГО JSON-массивом и НИЧЕМ больше (без markdown, без пояснений):
-[{"file":"путь","line":<число RIGHT-строки или null>,"severity":"P0|P1|P2",
-  "category":"bug|security|performance|style|design|test","message":"1–3 предложения",
-  "suggestion":"код на замену строки или null"}]
+Reply STRICTLY with a JSON array and NOTHING else (no markdown, no explanations):
+[{"file":"path","line":<RIGHT-side line number or null>,"severity":"P0|P1|P2",
+  "category":"bug|security|performance|style|design|test","message":"1-3 sentences in English",
+  "suggestion":"replacement code for the line or null"}]
 
-Правила:
-- line — номер в НОВОЙ версии файла (правая сторона диффа) или null, если не привязать.
-- severity: P0 — блокирующая ошибка, P1 — важная, P2 — мелкая.
-- suggestion — только код без markdown-обрамления, либо null.
-- Не выдумывай проблемы. Если их нет — верни [].
+Rules:
+- line — the number in the NEW version of the file (right side of the diff), or null if it can't be anchored.
+- severity: P0 — blocking error, P1 — important, P2 — minor.
+- suggestion — code only, without markdown fences, or null.
+- Do not invent problems. If there are none, return [].
+- Write every "message" in English.
 PROMPT
 }
 
