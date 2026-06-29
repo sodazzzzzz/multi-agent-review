@@ -228,8 +228,8 @@ defmodule Aggregator.RenderTest do
     end
   end
 
-  describe "фиксы ревью PR3" do
-    test "A: правка НЕ с якорной строки → не committable (защита от коммита не в ту строку)" do
+  describe "fidelity PR4 — suggestion↔строка (#3/#4)" do
+    test "инлайн якорится на строке несущей правку находки → committable именно там" do
       clusters =
         Cluster.build([
           finding(agent: "claude", file: "lib/a.ex", line: 10, severity: "P0", message: "Bug."),
@@ -244,32 +244,98 @@ defmodule Aggregator.RenderTest do
         ])
 
       out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [10, 11, 12])})
-      assert [%{line: 10, body: body}] = out.comments
-      refute body =~ "```suggestion"
-      assert body =~ "not auto-committable"
-      # правка не теряется — уходит в промпт для агента
-      assert body =~ "fix_line_12()"
+
+      # якорь смещён на строку 12 — туда, где правка → suggestion применится корректно
+      assert [%{line: 12, body: body}] = out.comments
+      assert body =~ "```suggestion\nfix_line_12()\n```"
     end
 
-    test "A: правка С якорной строки → committable" do
+    test "несколько правок в хунке → якорь на более серьёзной строке" do
       clusters =
         Cluster.build([
           finding(
             agent: "claude",
             file: "lib/a.ex",
             line: 10,
+            severity: "P1",
+            message: "Bug.",
+            suggestion: "fix_p1()"
+          ),
+          finding(
+            agent: "codex",
+            file: "lib/a.ex",
+            line: 12,
             severity: "P0",
             message: "Bug.",
-            suggestion: "fixed()"
-          ),
-          finding(agent: "codex", file: "lib/a.ex", line: 12, severity: "P0", message: "Bug.")
+            suggestion: "fix_p0()"
+          )
         ])
 
       out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [10, 11, 12])})
-      assert [%{line: 10, body: body}] = out.comments
-      assert body =~ "```suggestion\nfixed()\n```"
+      # обе несут правку → выбираем более серьёзную (P0@12)
+      assert [%{line: 12, body: body}] = out.comments
+      assert body =~ "```suggestion\nfix_p0()\n```"
     end
 
+    test "индекс summary указывает на строку инлайна (якорь), а не на замороженную строку кластера" do
+      clusters =
+        Cluster.build([
+          finding(agent: "claude", file: "lib/a.ex", line: 10, severity: "P1", message: "Issue."),
+          finding(
+            agent: "codex",
+            file: "lib/a.ex",
+            line: 12,
+            severity: "P1",
+            message: "Issue.",
+            suggestion: "fix()"
+          )
+        ])
+
+      out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [10, 11, 12])})
+
+      # инлайн якорится на 12 (там правка) → индекс тоже должен указывать на 12, не на 10
+      assert [%{line: 12}] = out.comments
+      assert out.summary =~ "<code>lib/a.ex:12</code>"
+      refute out.summary =~ "<code>lib/a.ex:10</code>"
+    end
+
+    test "якорная (мин.) строка не в хунке, соседняя из окна — в хунке → всё равно инлайн" do
+      clusters =
+        Cluster.build([
+          finding(agent: "claude", file: "lib/a.ex", line: 10, severity: "P1", message: "Issue."),
+          finding(agent: "codex", file: "lib/a.ex", line: 12, severity: "P1", message: "Issue.")
+        ])
+
+      # в хунке только строка 12; якорь кластера (10) — нет
+      out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [12])})
+      assert [%{line: 12}] = out.comments
+      refute out.summary =~ "Comments outside the diff"
+    end
+
+    test "правка с НЕ-вхунковой строки → не committable, но видна и в промпте" do
+      clusters =
+        Cluster.build([
+          finding(agent: "claude", file: "lib/a.ex", line: 10, severity: "P0", message: "Bug."),
+          finding(
+            agent: "codex",
+            file: "lib/a.ex",
+            line: 12,
+            severity: "P0",
+            message: "Bug.",
+            suggestion: "fix_off_hunk()"
+          )
+        ])
+
+      # в хунке только якорь (10); строка правки (12) вне хунка
+      out = Render.render(clusters, %{diff_index: diff_index("lib/a.ex", [10])})
+      assert [%{line: 10, body: body}] = out.comments
+      refute body =~ "```suggestion"
+      assert body =~ "not auto-committable"
+      assert body =~ "fix_off_hunk()"
+    end
+  end
+
+  describe "фиксы ревью PR3" do
     test "B: сокращение (e.g.) не рвёт заголовок — весь текст остаётся целым" do
       clusters =
         Cluster.build([finding(line: 1, message: "Avoid magic numbers e.g. 42 in the loop.")])
