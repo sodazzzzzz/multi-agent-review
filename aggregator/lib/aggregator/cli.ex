@@ -14,7 +14,7 @@ defmodule Aggregator.CLI do
 
   require Logger
 
-  alias Aggregator.{Artifacts, Claude, Cluster, Gate, Github, Polish, Render}
+  alias Aggregator.{Artifacts, Claude, Cluster, Gate, Github, Polish, Render, Walkthrough}
 
   @expected_agents ["claude", "codex", "deepseek"]
   @default_model "claude-opus-4-8"
@@ -50,15 +50,17 @@ defmodule Aggregator.CLI do
       |> Cluster.build(cfg.window)
 
     decision = Gate.decide(clusters, Gate.parse_mode(cfg.fail_on))
+    diff_text = read_diff(cfg.diff_path)
 
     output =
       Render.render(clusters, %{
-        diff_index: load_diff_index(cfg.diff_path),
+        diff_index: diff_index(diff_text),
         panel_size: length(oks),
         expected: length(cfg.expected_agents),
         failed_agents: Artifacts.missing_agents(result, cfg.expected_agents),
         decision: decision,
-        messages: polish(clusters, cfg)
+        messages: polish(clusters, cfg),
+        walkthrough: walkthrough(diff_text, clusters, cfg)
       })
 
     summary_url = post(client, output)
@@ -77,6 +79,17 @@ defmodule Aggregator.CLI do
     |> Polish.parse_rewrites()
     |> then(&Polish.merge(clusters, &1))
     |> Map.fetch!(:overrides)
+  end
+
+  # --- walkthrough (LLM-обзор PR, best-effort, как polish) ---
+
+  defp walkthrough(nil, _clusters, _cfg), do: nil
+
+  defp walkthrough(diff_text, clusters, cfg) do
+    diff_text
+    |> Walkthrough.prompt(clusters)
+    |> Claude.rewrite(model: cfg.model, bin: cfg.claude_bin)
+    |> Walkthrough.parse()
   end
 
   # --- постинг (ошибки логируем, прогон не роняем) ---
@@ -125,14 +138,17 @@ defmodule Aggregator.CLI do
 
   # --- дифф ---
 
-  defp load_diff_index(nil), do: %{}
+  defp read_diff(nil), do: nil
 
-  defp load_diff_index(path) do
+  defp read_diff(path) do
     case File.read(path) do
-      {:ok, patch} -> Aggregator.Diff.right_lines(patch)
-      {:error, _} -> %{}
+      {:ok, patch} -> patch
+      {:error, _} -> nil
     end
   end
+
+  defp diff_index(nil), do: %{}
+  defp diff_index(patch), do: Aggregator.Diff.right_lines(patch)
 
   # --- окружение ---
 
