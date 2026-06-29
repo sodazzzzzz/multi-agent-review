@@ -31,6 +31,7 @@ jobs:
       pr: ${{ steps.decide.outputs.pr }}
       head: ${{ steps.decide.outputs.head }}
       base: ${{ steps.decide.outputs.base }}
+      base_ref: ${{ steps.decide.outputs.base_ref }}
     steps:
       - id: decide
         env:
@@ -40,6 +41,7 @@ jobs:
           PR_EVENT_NUMBER: ${{ github.event.pull_request.number }}
           PR_EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
           PR_EVENT_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_EVENT_BASE_REF: ${{ github.event.pull_request.base.ref }}
           # Пользовательский ввод — ТОЛЬКО через env (инъекция в `run` исключена):
           IS_PR_COMMENT: ${{ github.event.issue.pull_request.url != '' }}
           COMMENT_BODY: ${{ github.event.comment.body }}
@@ -47,28 +49,34 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
           set -euo pipefail
-          run=false; pr=""; head=""; base=""
+          run=false; pr=""; head=""; base=""; base_ref=""
 
           if [ "$EVENT_NAME" = "pull_request" ]; then
             run=true
-            pr="$PR_EVENT_NUMBER"; head="$PR_EVENT_HEAD"; base="$PR_EVENT_BASE"
+            pr="$PR_EVENT_NUMBER"; head="$PR_EVENT_HEAD"
+            base="$PR_EVENT_BASE"; base_ref="$PR_EVENT_BASE_REF"
           elif [ "$EVENT_NAME" = "issue_comment" ] && [ "$IS_PR_COMMENT" = "true" ]; then
             cmd="$(printf '%s' "$COMMENT_BODY" | tr -d '[:space:]')"
             if [ "$cmd" = "/rerun-review" ] \
                && printf '%s\n' OWNER MEMBER COLLABORATOR | grep -qx "$COMMENT_ASSOC"; then
               pr="$ISSUE_NUMBER"
-              shas="$(gh api "repos/$REPO/pulls/$pr" --jq '"\(.base.sha) \(.head.sha)"')"
-              base="${shas%% *}"; head="${shas##* }"
+              # base.sha/head.sha — замороженный дифф PR; base.ref — имя базовой ветки
+              # (её tip берём для доверенных скриптов). Имя ветки без пробелов → read ок.
+              read -r base head base_ref <<<"$(gh api "repos/$REPO/pulls/$pr" \
+                --jq '"\(.base.sha) \(.head.sha) \(.base.ref)"')"
               run=true
             fi
           fi
 
           {
-            echo "run=$run"; echo "pr=$pr"; echo "head=$head"; echo "base=$base"
+            echo "run=$run"; echo "pr=$pr"; echo "head=$head"
+            echo "base=$base"; echo "base_ref=$base_ref"
           } >>"$GITHUB_OUTPUT"
-          echo "gate: run=$run pr=$pr base=$base head=$head"
+          echo "gate: run=$run pr=$pr base=$base base_ref=$base_ref head=$head"
 
-  # Считаем diff PR один раз. Скрипты берём из BASE-ref (доверенные); diff head — данные.
+  # Считаем diff PR один раз. Скрипты берём с TIP базовой ветки (доверенные и ВСЕГДА
+  # свежие — фиксы скриптов подхватываются уже открытыми PR), а сам diff заморожен на
+  # base.sha..head.sha. fetch-depth: 0 — чтобы base.sha был достижим из tip для diff.
   prepare:
     needs: gate
     if: needs.gate.outputs.run == 'true'
@@ -76,12 +84,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.gate.outputs.base }}
+          ref: ${{ needs.gate.outputs.base_ref }}
           fetch-depth: 0
-      - name: Fetch PR head
+      - name: Fetch PR head and base
         env:
           PR: ${{ needs.gate.outputs.pr }}
-        run: git fetch --no-tags origin "refs/pull/${PR}/head"
+          BASE: ${{ needs.gate.outputs.base }}
+        run: |
+          git fetch --no-tags origin "refs/pull/${PR}/head"
+          # base.sha обычно уже в истории базовой ветки (fetch-depth: 0). Если её
+          # форс-пушнули и коммит осиротел — тянем явно (best-effort; GitHub отдаёт
+          # достижимые SHA). Иначе three-dot diff упал бы на «not a valid object».
+          git fetch --no-tags origin "$BASE" || true
       - name: Построить diff
         env:
           BASE: ${{ needs.gate.outputs.base }}
@@ -100,7 +114,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.gate.outputs.base }}
+          ref: ${{ needs.gate.outputs.base_ref }}
       - uses: actions/download-artifact@v4
         with:
           name: diff
@@ -125,7 +139,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.gate.outputs.base }}
+          ref: ${{ needs.gate.outputs.base_ref }}
       - uses: actions/download-artifact@v4
         with:
           name: diff
@@ -145,7 +159,7 @@ jobs:
   # Третий агент — Codex (ChatGPT-план). Opt-in по vars.ENABLE_CODEX: без него джоб
   # дремлет, а панель остаётся 2-агентной (см. expected-agents в aggregate). Auth —
   # round-trip: restore из секрета → codex exec → persist обновлённого auth.json назад
-  # (refresh-токен одноразовый). Скрипты из base-ref; diff — это данные (read-only sandbox).
+  # (refresh-токен одноразовый). Скрипты с tip base-ветки; diff — это данные (read-only sandbox).
   codex:
     needs: [gate, prepare]
     if: needs.gate.outputs.run == 'true' && vars.ENABLE_CODEX == 'true'
@@ -163,7 +177,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.gate.outputs.base }}
+          ref: ${{ needs.gate.outputs.base_ref }}
       - uses: actions/download-artifact@v4
         with:
           name: diff
@@ -199,7 +213,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.gate.outputs.base }}
+          ref: ${{ needs.gate.outputs.base_ref }}
       # download-artifact кладёт каждый артефакт в свою подпапку:
       # _artifacts/review-<agent>/review-<agent>.json (матчит **/review-*.json),
       # _artifacts/diff/diff.patch. Поэтому reviews-dir = _artifacts напрямую.
