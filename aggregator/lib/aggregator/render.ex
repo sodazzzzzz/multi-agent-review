@@ -119,14 +119,32 @@ defmodule Aggregator.Render do
   # nil → секция отсутствует (claude недоступен/кривой ответ — деградация в Aggregator.Walkthrough).
   defp walkthrough_details(nil), do: nil
 
-  defp walkthrough_details(%{tldr: tldr, files: files, mermaid: mermaid}) do
+  defp walkthrough_details(%{tldr: tldr, groups: groups, mermaid: mermaid}) do
     body =
-      [walkthrough_text(tldr), files_table(files), mermaid_block(mermaid)]
+      [walkthrough_text(tldr), cohort_sections(groups), mermaid_block(mermaid)]
       |> Enum.reject(&blank?/1)
       |> Enum.join("\n\n")
 
     details_block("📝 Walkthrough", body)
   end
+
+  # Когорты: на каждую — строка-заголовок «**Тема** — что затрагивает», под ней
+  # пофайловая таблица. Так виден и состав PR (темы), и конкретные изменения по файлам.
+  defp cohort_sections([]), do: nil
+  defp cohort_sections(groups), do: Enum.map_join(groups, "\n\n", &cohort_section/1)
+
+  defp cohort_section(%{title: title, summary: summary, files: files}) do
+    [cohort_heading(title, summary), files_table(files)]
+    |> Enum.reject(&blank?/1)
+    |> Enum.join("\n\n")
+  end
+
+  defp cohort_heading("", ""), do: nil
+  defp cohort_heading("", summary), do: walkthrough_text(summary)
+  defp cohort_heading(title, ""), do: "**#{walkthrough_text(title)}**"
+
+  defp cohort_heading(title, summary),
+    do: "**#{walkthrough_text(title)}** — #{walkthrough_text(summary)}"
 
   # Проза walkthrough — markdown в теле <details> (НЕ внутри забора). Помимо обычного
   # экранирования глушим бэктики сущностью: одиночный отрендерится как обычный `, а
@@ -139,8 +157,8 @@ defmodule Aggregator.Render do
 
   defp files_table(files) do
     rows =
-      Enum.map_join(files, "\n", fn %{path: path, summary: summary} ->
-        "| <code>#{cell(html_escape(path))}</code> | #{cell(md_escape(summary))} |"
+      Enum.map_join(files, "\n", fn %{path: path, change: change} ->
+        "| <code>#{cell(html_escape(path))}</code> | #{cell(md_escape(change))} |"
       end)
 
     "| File | Change |\n| --- | --- |\n" <> rows

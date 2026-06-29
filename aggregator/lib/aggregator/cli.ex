@@ -94,17 +94,21 @@ defmodule Aggregator.CLI do
 
   # --- постинг (ошибки логируем, прогон не роняем) ---
 
+  # Постим обзор ПЕРВЫМ, инлайны — после (как CodeRabbit: walkthrough сверху ленты,
+  # инлайн-комменты под ним). Вызовы независимы; ошибки логируем, прогон не роняем.
   defp post(client, %{summary: summary, comments: comments}) do
+    url =
+      case Github.post_summary(client, summary) do
+        {:ok, posted} when is_binary(posted) ->
+          posted
+
+        other ->
+          log_result("summary", other)
+          ""
+      end
+
     log_result("review", Github.post_review(client, comments))
-
-    case Github.post_summary(client, summary) do
-      {:ok, url} when is_binary(url) ->
-        url
-
-      other ->
-        log_result("summary", other)
-        ""
-    end
+    url
   end
 
   defp log_result(_what, {:ok, _}), do: :ok

@@ -14,28 +14,32 @@ defmodule Aggregator.Walkthrough do
   alias Aggregator.Cluster
 
   @typedoc "Нормализованный обзор: непустой TL;DR, список файлов, mermaid либо nil."
-  @type t :: %{
-          tldr: String.t(),
-          files: [%{path: String.t(), summary: String.t()}],
-          mermaid: String.t() | nil
-        }
+  @type file_change :: %{path: String.t(), change: String.t()}
+  @type group :: %{title: String.t(), summary: String.t(), files: [file_change()]}
+  @type t :: %{tldr: String.t(), groups: [group()], mermaid: String.t() | nil}
 
   # Сколько символов диффа отдаём модели. Диффы бывают огромны, а для обзора нужен смысл,
   # не каждая строка — режем по бюджету (дёшево и достаточно для TL;DR/таблицы).
   @diff_budget 12_000
 
-  # Максимум строк в таблице файлов — большие PR не должны раздувать обзор.
-  @max_files 12
+  # Лимиты, чтобы большой PR не раздувал обзор: когорт всего и файлов в одной когорте.
+  @max_groups 10
+  @max_files 15
 
   @preamble """
   You are summarizing a pull request for reviewers. Read the unified diff below and produce a concise walkthrough.
   Reply STRICTLY with a single JSON object and nothing else, of the form:
   {"tldr": "<1-3 sentence plain-English summary of what this PR does>",
-   "files": [{"path": "<file path>", "summary": "<one short phrase on what changed>"}],
+   "groups": [
+     {"title": "<short theme / subsystem name>",
+      "summary": "<one phrase on what this group of files changes>",
+      "files": [{"path": "<file path>", "change": "<one short phrase on what changed in this file>"}]}
+   ],
    "mermaid": "<optional Mermaid diagram of the main flow, or an empty string>"}
-  Rules: plain English, no markdown inside any field. Keep "tldr" under ~60 words. List only the
-  most important files. For "mermaid": include a diagram ONLY if it genuinely clarifies the change
-  and is valid Mermaid (e.g. starting with `sequenceDiagram` or `flowchart TD`); otherwise use "".
+  Rules: plain English, no markdown inside any field. Keep "tldr" under ~60 words. GROUP related files into
+  cohorts by subsystem/theme (e.g. "Config", "API", "Tests", "Docs"); a small PR may be a single group. Each
+  file appears once under its group with a short per-file change. For "mermaid": include a diagram ONLY if it
+  genuinely clarifies the change and is valid Mermaid (e.g. `sequenceDiagram` or `flowchart TD`); else use "".
   """
 
   @doc "Построить промпт обзора из текста диффа (кластеры пока не используются — задел)."
@@ -64,7 +68,7 @@ defmodule Aggregator.Walkthrough do
          trimmed when trimmed != "" <- String.trim(tldr) do
       %{
         tldr: trimmed,
-        files: parse_files(Map.get(obj, "files")),
+        groups: parse_groups(obj),
         mermaid: parse_mermaid(Map.get(obj, "mermaid"))
       }
     else
@@ -74,22 +78,69 @@ defmodule Aggregator.Walkthrough do
 
   def parse(_non_binary), do: nil
 
-  defp parse_files(list) when is_list(list) do
-    list
-    |> Enum.flat_map(fn
-      %{"path" => p, "summary" => s} when is_binary(p) and is_binary(s) ->
-        case {String.trim(p), String.trim(s)} do
-          {"", _} -> []
-          {path, summary} -> [%{path: path, summary: summary}]
+  # Когорты: список групп. Если модель проигнорировала группировку и вернула плоский
+  # `files` — заворачиваем его в одну безымянную когорту (терпимость к дрейфу модели).
+  defp parse_groups(obj) do
+    case obj |> Map.get("groups") |> normalize_groups() do
+      [] ->
+        case parse_files(Map.get(obj, "files")) do
+          [] -> []
+          files -> [%{title: "", summary: "", files: files}]
         end
 
-      _other ->
-        []
-    end)
-    |> Enum.take(@max_files)
+      groups ->
+        groups
+    end
   end
 
+  defp normalize_groups(list) when is_list(list),
+    do: list |> Enum.flat_map(&parse_group/1) |> Enum.take(@max_groups)
+
+  defp normalize_groups(_non_list), do: []
+
+  # Принимаем любую map-группу: title НЕобязателен (рендер умеет безымянную когорту) —
+  # иначе группа с файлами, но без title терялась бы целиком. Пустую целиком отбрасываем.
+  defp parse_group(group) when is_map(group) do
+    title = trimmed_string(Map.get(group, "title"))
+    summary = trimmed_string(Map.get(group, "summary"))
+    files = parse_files(Map.get(group, "files"))
+
+    if title == "" and summary == "" and files == [],
+      do: [],
+      else: [%{title: title, summary: summary, files: files}]
+  end
+
+  defp parse_group(_non_group), do: []
+
+  defp parse_files(list) when is_list(list),
+    do: list |> Enum.flat_map(&file_entry/1) |> Enum.take(@max_files)
+
   defp parse_files(_non_list), do: []
+
+  # Изменение файла — первый НЕпустой из "change" или (дрейф модели) "summary"; путь
+  # обязателен. (Пустой "change" не должен затирать осмысленный "summary".)
+  defp file_entry(%{"path" => path} = file) when is_binary(path) do
+    change = first_nonblank([Map.get(file, "change"), Map.get(file, "summary")])
+
+    case String.trim(path) do
+      "" -> []
+      trimmed -> [%{path: trimmed, change: change}]
+    end
+  end
+
+  defp file_entry(_non_file), do: []
+
+  defp first_nonblank(values) do
+    Enum.find_value(values, "", fn v ->
+      case trimmed_string(v) do
+        "" -> nil
+        s -> s
+      end
+    end)
+  end
+
+  defp trimmed_string(s) when is_binary(s), do: String.trim(s)
+  defp trimmed_string(_non_binary), do: ""
 
   defp parse_mermaid(m) when is_binary(m) do
     case String.trim(m) do
