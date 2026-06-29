@@ -20,18 +20,42 @@ defmodule Aggregator.CLITest do
     File.write!(Path.join(sub, "review-#{agent}.json"), Jason.encode!(envelope(agent, [finding])))
   end
 
-  # Фейк-«claude»: печатает JSON-конверт с правкой message по id:1.
+  # Фейк-«claude»: по тексту промпта различает polish (массив правок) и walkthrough
+  # (JSON-объект обзора); оба обёрнуты в result-конверт claude.
   defp fake_claude(dir) do
-    inner = Jason.encode!([%{"id" => 1, "message" => "причёсано P0"}])
-    out = Path.join(dir, "claude_out.json")
-    File.write!(out, Jason.encode!(%{"type" => "result", "result" => inner}))
+    polish = result_envelope(Jason.encode!([%{"id" => 1, "message" => "причёсано P0"}]))
+
+    walk =
+      result_envelope(
+        Jason.encode!(%{
+          "tldr" => "PR adds a guard.",
+          "files" => [%{"path" => "lib/a.ex", "summary" => "guard zero"}],
+          "mermaid" => ""
+        })
+      )
+
+    pf = Path.join(dir, "polish_out.json")
+    wf = Path.join(dir, "walk_out.json")
+    File.write!(pf, polish)
+    File.write!(wf, walk)
     bin = Path.join(dir, "fake_claude.sh")
 
-    # Путь в кавычки: tmp_dir ExUnit включает имя теста, где бывают скобки/пробелы.
-    File.write!(bin, "#!/bin/sh\ncat '#{out}'\n")
+    # claude зовётся как `claude -p <prompt> ...` → $2 = промпт. Walkthrough-преамбула
+    # содержит «summarizing a pull request»; остальное — polish. Пути в кавычках: tmp_dir
+    # включает имя теста (бывают скобки/пробелы).
+    File.write!(bin, """
+    #!/bin/sh
+    case "$2" in
+      *"summarizing a pull request"*) cat '#{wf}' ;;
+      *) cat '#{pf}' ;;
+    esac
+    """)
+
     File.chmod!(bin, 0o755)
     bin
   end
+
+  defp result_envelope(inner), do: Jason.encode!(%{"type" => "result", "result" => inner})
 
   # Клиент с адаптером, который шлёт каждый POST тест-процессу и отвечает 201.
   defp capturing_client do
@@ -125,6 +149,10 @@ defmodule Aggregator.CLITest do
     assert summary =~ "panel 2/3"
     assert summary =~ "Did not complete: deepseek"
     assert summary =~ "🟡 2/3"
+
+    # Walkthrough-секция (LLM-обзор) с TL;DR — второй best-effort вызов claude
+    assert summary =~ "📝 Walkthrough"
+    assert summary =~ "PR adds a guard."
 
     # GITHUB_OUTPUT
     output = File.read!(out_path)
