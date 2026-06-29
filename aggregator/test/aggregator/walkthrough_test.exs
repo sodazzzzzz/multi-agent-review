@@ -4,9 +4,10 @@ defmodule Aggregator.WalkthroughTest do
   alias Aggregator.Walkthrough
 
   describe "prompt/2" do
-    test "включает инструкцию вернуть JSON-объект и текст диффа" do
+    test "включает инструкцию про JSON-объект, когорты и текст диффа" do
       p = Walkthrough.prompt("diff --git a/x b/x\n+code", [])
       assert p =~ "STRICTLY with a single JSON object"
+      assert p =~ "GROUP related files into"
       assert p =~ "diff --git a/x b/x"
     end
 
@@ -18,44 +19,113 @@ defmodule Aggregator.WalkthroughTest do
   end
 
   describe "parse/1" do
-    test "валидный объект → нормализованная карта" do
+    test "валидный объект с когортами → нормализованная карта" do
       raw =
         Jason.encode!(%{
-          "tldr" => "Adds a guard.",
-          "files" => [%{"path" => "a.ex", "summary" => "guard"}],
+          "tldr" => "Adds metrics.",
+          "groups" => [
+            %{
+              "title" => "Observability",
+              "summary" => "prometheus + otel",
+              "files" => [
+                %{"path" => "obs.ex", "change" => "setup"},
+                %{"path" => "tel.ex", "change" => "metrics"}
+              ]
+            }
+          ],
           "mermaid" => "flowchart TD\nA-->B"
         })
 
       assert %{
-               tldr: "Adds a guard.",
-               files: [%{path: "a.ex", summary: "guard"}],
-               mermaid: "flowchart TD\nA-->B"
+               tldr: "Adds metrics.",
+               mermaid: "flowchart TD\nA-->B",
+               groups: [
+                 %{
+                   title: "Observability",
+                   summary: "prometheus + otel",
+                   files: [
+                     %{path: "obs.ex", change: "setup"},
+                     %{path: "tel.ex", change: "metrics"}
+                   ]
+                 }
+               ]
              } = Walkthrough.parse(raw)
     end
 
-    test "JSON в ```-заборе/с прозой — выкусываем объект" do
-      raw = "Here you go:\n```json\n{\"tldr\":\"X.\",\"files\":[]}\n```"
-      assert %{tldr: "X.", files: [], mermaid: nil} = Walkthrough.parse(raw)
+    test "fallback: плоский files без groups → одна безымянная когорта" do
+      raw = Jason.encode!(%{"tldr" => "T.", "files" => [%{"path" => "a.ex", "change" => "x"}]})
+
+      assert %{groups: [%{title: "", summary: "", files: [%{path: "a.ex", change: "x"}]}]} =
+               Walkthrough.parse(raw)
     end
 
-    test "пустой mermaid → nil; мусорные элементы files отброшены" do
+    test "изменение файла принимается из change ИЛИ summary (дрейф модели)" do
       raw =
         Jason.encode!(%{
           "tldr" => "T.",
-          "files" => [
-            %{"path" => "", "summary" => "x"},
+          "groups" => [%{"title" => "G", "files" => [%{"path" => "a.ex", "summary" => "y"}]}]
+        })
+
+      assert %{groups: [%{title: "G", summary: "", files: [%{path: "a.ex", change: "y"}]}]} =
+               Walkthrough.parse(raw)
+    end
+
+    test "пустой change не затирает summary (берём первый непустой)" do
+      raw =
+        Jason.encode!(%{
+          "tldr" => "T.",
+          "groups" => [
+            %{
+              "title" => "G",
+              "files" => [%{"path" => "a.ex", "change" => "", "summary" => "real"}]
+            }
+          ]
+        })
+
+      assert %{groups: [%{files: [%{path: "a.ex", change: "real"}]}]} = Walkthrough.parse(raw)
+    end
+
+    test "группа без title, но с файлами → безымянная когорта (не теряется)" do
+      raw =
+        Jason.encode!(%{
+          "tldr" => "T.",
+          "groups" => [%{"files" => [%{"path" => "a.ex", "change" => "x"}]}]
+        })
+
+      assert %{groups: [%{title: "", summary: "", files: [%{path: "a.ex", change: "x"}]}]} =
+               Walkthrough.parse(raw)
+    end
+
+    test "JSON в ```-заборе/с прозой — выкусываем объект" do
+      raw = "Here you go:\n```json\n{\"tldr\":\"X.\",\"groups\":[]}\n```"
+      assert %{tldr: "X.", groups: [], mermaid: nil} = Walkthrough.parse(raw)
+    end
+
+    test "пустой mermaid → nil; мусор/пустые когорты и плохие файлы отброшены" do
+      raw =
+        Jason.encode!(%{
+          "tldr" => "T.",
+          "groups" => [
             "junk",
-            %{"path" => "ok.ex", "summary" => "y"}
+            %{"title" => "", "files" => []},
+            %{
+              "title" => "G",
+              "files" => [%{"path" => "", "change" => "x"}, %{"path" => "ok.ex", "change" => "y"}]
+            }
           ],
           "mermaid" => "   "
         })
 
-      assert %{tldr: "T.", files: [%{path: "ok.ex", summary: "y"}], mermaid: nil} =
+      assert %{
+               tldr: "T.",
+               mermaid: nil,
+               groups: [%{title: "G", files: [%{path: "ok.ex", change: "y"}]}]
+             } =
                Walkthrough.parse(raw)
     end
 
     test "нет/пустой tldr, не-JSON, не-строка → nil" do
-      assert Walkthrough.parse(Jason.encode!(%{"files" => []})) == nil
+      assert Walkthrough.parse(Jason.encode!(%{"groups" => []})) == nil
       assert Walkthrough.parse(Jason.encode!(%{"tldr" => "   "})) == nil
       assert Walkthrough.parse("not json at all") == nil
       assert Walkthrough.parse("") == nil
@@ -63,13 +133,20 @@ defmodule Aggregator.WalkthroughTest do
       assert Walkthrough.parse(42) == nil
     end
 
-    test "files ограничены лимитом (12)" do
-      files = for i <- 1..30, do: %{"path" => "f#{i}.ex", "summary" => "s"}
+    test "лимиты: 10 когорт, 15 файлов в когорте" do
+      groups =
+        for i <- 1..14 do
+          %{
+            "title" => "G#{i}",
+            "files" => for(j <- 1..20, do: %{"path" => "f#{i}_#{j}.ex", "change" => "c"})
+          }
+        end
 
-      assert %{files: parsed} =
-               Walkthrough.parse(Jason.encode!(%{"tldr" => "T.", "files" => files}))
+      assert %{groups: parsed} =
+               Walkthrough.parse(Jason.encode!(%{"tldr" => "T.", "groups" => groups}))
 
-      assert length(parsed) == 12
+      assert length(parsed) == 10
+      assert length(hd(parsed).files) == 15
     end
   end
 end

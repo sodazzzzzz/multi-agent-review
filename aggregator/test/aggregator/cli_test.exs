@@ -29,7 +29,13 @@ defmodule Aggregator.CLITest do
       result_envelope(
         Jason.encode!(%{
           "tldr" => "PR adds a guard.",
-          "files" => [%{"path" => "lib/a.ex", "summary" => "guard zero"}],
+          "groups" => [
+            %{
+              "title" => "Demo",
+              "summary" => "planted issues",
+              "files" => [%{"path" => "lib/a.ex", "change" => "guard zero"}]
+            }
+          ],
           "mermaid" => ""
         })
       )
@@ -150,9 +156,10 @@ defmodule Aggregator.CLITest do
     assert summary =~ "Did not complete: deepseek"
     assert summary =~ "🟡 2/3"
 
-    # Walkthrough-секция (LLM-обзор) с TL;DR — второй best-effort вызов claude
+    # Walkthrough-секция (LLM-обзор) с TL;DR и когортой — второй best-effort вызов claude
     assert summary =~ "📝 Walkthrough"
     assert summary =~ "PR adds a guard."
+    assert summary =~ "**Demo** — planted issues"
 
     # GITHUB_OUTPUT
     output = File.read!(out_path)
