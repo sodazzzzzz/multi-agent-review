@@ -11,6 +11,9 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  # aggregate тянет релизный образ действия из GHCR (action.yml image: docker://ghcr.io/...);
+  # для pull приватного пакета того же репо джобе нужен packages: read.
+  packages: read
 
 # Один прогон на PR за раз. cancel-in-progress: FALSE — НЕ отменяем на лету: codex
 # рефрешит ОДНОРАЗОВЫЙ токен и persist'ит его в конце; отмена посреди рефреша осиротила
