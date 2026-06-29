@@ -378,6 +378,55 @@ defmodule Aggregator.RenderTest do
     end
   end
 
+  describe "walkthrough (LLM-обзор PR)" do
+    test "nil → секции нет" do
+      out = Render.render(Cluster.build([finding(line: 1)]), %{walkthrough: nil})
+      refute out.summary =~ "Walkthrough"
+    end
+
+    test "tldr + таблица файлов + валидный mermaid → секция со всем" do
+      wt = %{
+        tldr: "Adds a guard to refunds.",
+        files: [%{path: "lib/a.ex", summary: "guard zero"}],
+        mermaid: "flowchart TD\nA-->B"
+      }
+
+      out = Render.render(Cluster.build([finding(line: 1)]), %{walkthrough: wt})
+      assert out.summary =~ "<summary>📝 Walkthrough</summary>"
+      assert out.summary =~ "Adds a guard to refunds."
+      assert out.summary =~ "| File | Change |"
+      assert out.summary =~ "<code>lib/a.ex</code>"
+      assert out.summary =~ "```mermaid\nflowchart TD\nA-->B\n```"
+    end
+
+    test "невалидный mermaid отбрасывается, tldr остаётся" do
+      wt = %{tldr: "T.", files: [], mermaid: "not a diagram, just prose"}
+      out = Render.render(Cluster.build([finding(line: 1)]), %{walkthrough: wt})
+      assert out.summary =~ "<summary>📝 Walkthrough</summary>"
+      assert out.summary =~ "T."
+      refute out.summary =~ "```mermaid"
+    end
+
+    test "mermaid с ```-забором отбрасывается (не ломает блок)" do
+      wt = %{tldr: "T.", files: [], mermaid: "flowchart TD\nA-->B\n```evil"}
+      out = Render.render(Cluster.build([finding(line: 1)]), %{walkthrough: wt})
+      refute out.summary =~ "```mermaid"
+    end
+
+    test "`|` в ячейке таблицы экранируется сущностью (не ломает таблицу)" do
+      wt = %{tldr: "T.", files: [%{path: "a.ex", summary: "do a | b"}], mermaid: nil}
+      out = Render.render(Cluster.build([finding(line: 1)]), %{walkthrough: wt})
+      assert out.summary =~ "do a &#124; b"
+    end
+
+    test "тройной ``` в tldr/summary глушится сущностью (не открывает код-забор)" do
+      wt = %{tldr: "Done. ```", files: [%{path: "a.ex", summary: "see ```js"}], mermaid: nil}
+      out = Render.render(Cluster.build([finding(line: 1)]), %{walkthrough: wt})
+      assert out.summary =~ "Done. &#96;&#96;&#96;"
+      assert out.summary =~ "see &#96;&#96;&#96;js"
+    end
+  end
+
   describe "лимит размера summary (защита от 422 GitHub)" do
     test "большой PR → summary не пробивает лимит, обзор не теряется целиком" do
       big =

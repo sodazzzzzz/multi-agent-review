@@ -61,7 +61,8 @@ defmodule Aggregator.Render do
       expected: Map.get(context, :expected, @full_panel),
       failed_agents: Map.get(context, :failed_agents, []),
       decision: Map.get(context, :decision, {:pass, "advisory"}),
-      messages: Map.get(context, :messages, %{})
+      messages: Map.get(context, :messages, %{}),
+      walkthrough: Map.get(context, :walkthrough, nil)
     }
   end
 
@@ -104,12 +105,66 @@ defmodule Aggregator.Render do
       header(clusters, ctx),
       failed_banner(ctx.failed_agents),
       gate_line(ctx.decision),
+      walkthrough_details(ctx.walkthrough),
       findings_details(tagged, ctx),
       outside_details(outside, ctx, full?),
       footer(ctx.decision)
     ]
     |> Enum.reject(&blank?/1)
     |> Enum.join("\n\n")
+  end
+
+  # --- walkthrough (LLM-обзор PR, best-effort) ---
+
+  # nil → секция отсутствует (claude недоступен/кривой ответ — деградация в Aggregator.Walkthrough).
+  defp walkthrough_details(nil), do: nil
+
+  defp walkthrough_details(%{tldr: tldr, files: files, mermaid: mermaid}) do
+    body =
+      [walkthrough_text(tldr), files_table(files), mermaid_block(mermaid)]
+      |> Enum.reject(&blank?/1)
+      |> Enum.join("\n\n")
+
+    details_block("📝 Walkthrough", body)
+  end
+
+  # Проза walkthrough — markdown в теле <details> (НЕ внутри забора). Помимо обычного
+  # экранирования глушим бэктики сущностью: одиночный отрендерится как обычный `, а
+  # тройной от модели НЕ откроет код-забор (иначе ``` «съел» бы весь summary до конца).
+  defp walkthrough_text(text), do: text |> oneline() |> md_escape() |> defang_backticks()
+
+  defp defang_backticks(text), do: String.replace(text, "`", "&#96;")
+
+  defp files_table([]), do: nil
+
+  defp files_table(files) do
+    rows =
+      Enum.map_join(files, "\n", fn %{path: path, summary: summary} ->
+        "| <code>#{cell(html_escape(path))}</code> | #{cell(md_escape(summary))} |"
+      end)
+
+    "| File | Change |\n| --- | --- |\n" <> rows
+  end
+
+  # В ячейке таблицы `|` — разделитель колонок, перевод строки рвёт ряд, а тройной
+  # бэктик открыл бы забор: схлопываем в строку и глушим `|` и `` ` `` HTML-сущностями
+  # (рендерятся как символы, таблицу/блок не ломают).
+  defp cell(text), do: text |> oneline() |> String.replace("|", "&#124;") |> defang_backticks()
+
+  defp mermaid_block(nil), do: nil
+
+  defp mermaid_block(diagram) do
+    if valid_mermaid?(diagram), do: fenced(diagram, "mermaid"), else: nil
+  end
+
+  # Лёгкий guard: диаграмма должна начинаться с известного типа mermaid (иначе модель
+  # вернула прозу/мусор). Полный парсер не тащим — синтаксические огрехи GitHub деградирует
+  # сам, но не-диаграмму и наличие ```-забора (сломал бы наш блок) отсекаем здесь.
+  @mermaid_types ~w(graph flowchart sequenceDiagram classDiagram stateDiagram stateDiagram-v2
+                    erDiagram journey gantt pie gitGraph mindmap timeline quadrantChart)
+  defp valid_mermaid?(diagram) do
+    head = diagram |> String.trim_leading() |> String.split(~r/\s/, parts: 2) |> List.first()
+    head in @mermaid_types and not String.contains?(diagram, "```")
   end
 
   defp header([], _ctx), do: "## 🔍 Multi-agent review\n\n✅ No issues found."
