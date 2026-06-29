@@ -1,55 +1,59 @@
 defmodule Aggregator.Render do
   @moduledoc """
-  Чистая отрисовка итогов ревью в ОДИН Markdown-комментарий.
+  Чистая отрисовка итогов ревью в формате «walkthrough + инлайны» (как CodeRabbit).
 
-  Вход — замороженные кластеры (`Aggregator.Cluster`) и контекст прогона; выход —
-  `%{summary: markdown, comments: []}`. Всё ревью консолидировано в `summary`
-  (отдельные inline-комменты к строкам больше не постим — выходило слишком объёмно,
-  находки дублировались):
+  `render/2` возвращает `%{summary, comments}`:
 
-    * шапка: счётчики, статус gating, пометка об упавших агентах;
-    * список ВСЕХ находок (ничего не прячем), отсортированный `Cluster`'ом по
-      консенсусу; у каждой — метка уверенности (`N/M`, `low-confidence` при одной
-      модели), severity и категория;
-    * сами находки — плоским списком-буллетами, без дропдаунов (чтобы их легко
-      было сканировать);
-    * один общий `<details>` снизу: «код-доказательства» (diff «сломанный код →
-      предложение» по находкам с готовой правкой; код заморожен) + готовый ПРОМПТ
-      «исправь все находки» для ИИ-агента.
+    * `summary` — ОДИН issue-комментарий-обзор. Видимы только шапка (счётчики +
+      статус gating + баннер упавших агентов); всё содержательное — в сворачиваемых
+      `<details>`-дропдаунах: индекс находок и секция «Comments outside the diff»
+      (находки, чья строка НЕ попадает в хунк диффа — инлайн к ним невозможен).
+    * `comments` — инлайн-комменты PR-review, по одному на кластер, чья строка есть
+      в диффе (`Aggregator.Diff.in_hunk?`). Тело инлайна: бейджи (категория · severity ·
+      консенсус N/expected), заголовок+проза, «found by», и в дропдаунах — однокликовый
+      `suggestion` (только если правка с якорной строки) и промпт для ИИ-агента.
 
-  Никакой сети — детерминированно. Текст замечания берётся из `:messages`
-  (одобренные `Aggregator.Polish`-правки по `id`), иначе — детерминированный из
-  findings. «Сломанный код» берётся из `:diff_index` (`Aggregator.Diff` хранит и
-  текст RIGHT-строк); если строки в диффе нет — показываем только предложение.
+  Всё детерминированно, без сети. Текст замечания — одобренная правка `Polish` по id
+  (`:messages`) либо детерминированный из findings. Консенсус/severity/строки заморожены
+  в `Aggregator.Cluster`.
 
-  Контекст (все поля опциональны, есть дефолты):
+  Контекст (поля опциональны, есть дефолты):
 
-    * `:diff_index`    — `Aggregator.Diff.t()` (строки и их текст). Дефолт `%{}`.
-    * `:panel_size`    — сколько агентов реально отдали вывод (`M` в `N/M`). Дефолт 3.
-    * `:expected`      — размер полной панели. Дефолт 3.
+    * `:diff_index`    — `Aggregator.Diff.t()` (строки и текст). Дефолт `%{}`.
+    * `:panel_size`    — сколько агентов реально отдали вывод (`M` в «panel M/expected»). Дефолт 3.
+    * `:expected`      — размер полной панели (знаменатель консенсуса `N/expected`). Дефолт 3.
     * `:failed_agents` — имена не отработавших агентов. Дефолт `[]`.
-    * `:decision`      — решение `Aggregator.Gate.decide/2`. Дефолт `{:pass, ...}`.
+    * `:decision`      — решение `Aggregator.Gate.decide/2`. Дефолт `{:pass, "advisory"}`.
     * `:messages`      — `%{id => текст}` после `Polish`. Дефолт `%{}`.
   """
 
   alias Aggregator.{Cluster, Consensus, Diff}
 
-  @type output :: %{summary: String.t(), comments: []}
+  @type comment :: %{path: String.t(), line: pos_integer(), body: String.t()}
+  @type output :: %{summary: String.t(), comments: [comment()]}
 
   @full_panel 3
 
-  # Лимит тела issue-комментария GitHub — 65536 символов; держим запас. Полный вид
-  # (диффы + промпт, дублирующий suggestion'ы) на большом PR легко его пробивает →
-  # POST вернул бы 422 и ВЕСЬ обзор пропал бы. Поэтому деградируем по тирам.
+  # Лимит тела issue-коммента GitHub — 65536; держим запас. Summary теперь компактный
+  # (индекс + свёрнутые секции), но «Comments outside diff» на огромном PR может пробить
+  # лимит → деградируем (полные записи → индекс) и в крайнем случае усекаем.
   @max_body 60_000
 
-  @doc "Построить ОДИН консолидированный коммент-ревью из кластеров."
+  @cut_note "\n\n> ⚠️ …review truncated due to GitHub's comment limit (too many findings)."
+
+  # Голова «1-го предложения» оканчивается распространённым сокращением → НЕ граница.
+  @abbrev_tail ~r/\b(e\.g|i\.e|etc|vs|cf|al|Mr|Mrs|Ms|Dr|Prof|No|Fig|Eq|Sec|Ch|Inc|Ltd)\.$/i
+
+  @doc "Построить обзор-коммент (`summary`) + инлайн-комменты (`comments`) из кластеров."
   @spec render([Cluster.t()], map()) :: output()
   def render(clusters, context \\ %{}) when is_list(clusters) do
     ctx = normalize(context)
+    {inline, outside} = Enum.split_with(clusters, &inline?(&1, ctx))
 
-    # Inline-комментов больше нет — всё в одном summary (см. moduledoc).
-    %{summary: summary(clusters, ctx), comments: []}
+    %{
+      summary: summary(clusters, outside, ctx),
+      comments: Enum.map(inline, &inline_comment(&1, ctx))
+    }
   end
 
   defp normalize(context) do
@@ -63,64 +67,43 @@ defmodule Aggregator.Render do
     }
   end
 
-  # --- сборка коммента ---
+  # Инлайн возможен только если строка кластера реально в хунке диффа (иначе Pulls API → 422).
+  defp inline?(%Cluster{file: file, line: line}, ctx),
+    do: Diff.in_hunk?(ctx.diff_index, file, line)
 
-  # Полный вид = список находок + общий дропдаун (доказательства + промпт). Если он не
-  # влезает в лимит — деградируем до одного списка находок; если и тот не влез (сотни
-  # находок) — жёстко режем. Обзор не теряется целиком. Компактный вид считаем максимум
-  # один раз: hard_cap вернёт его как есть, если влезает, иначе усечёт.
-  defp summary(clusters, ctx) do
-    full = assemble(clusters, ctx, true)
+  # --- summary (обзор-коммент) ---
+
+  # Полный вид; если не влез в лимит — компактный (вне-диффовые находки свёрнуты в
+  # индекс); если и тот велик — жёстко режем. Обзор не теряется целиком.
+  defp summary(all, outside, ctx) do
+    full = assemble_summary(all, outside, ctx, true)
 
     if String.length(full) <= @max_body,
       do: full,
-      else: hard_cap(assemble(clusters, ctx, false))
+      else: hard_cap(assemble_summary(all, outside, ctx, false))
   end
 
-  defp assemble(clusters, ctx, extras) do
+  defp assemble_summary(all, outside, ctx, full?) do
     [
-      "## 🔍 Multi-agent review",
-      overview(clusters, ctx),
+      header(all, ctx),
       failed_banner(ctx.failed_agents),
       gate_line(ctx.decision),
-      size_note(extras, clusters),
-      findings_section(clusters, ctx),
-      if(extras, do: action_section(clusters, ctx)),
+      findings_details(all, ctx),
+      outside_details(outside, ctx, full?),
       footer(ctx.decision)
     ]
     |> Enum.reject(&blank?/1)
     |> Enum.join("\n\n")
   end
 
-  # Пометка о деградации — только когда общий дропдаун свёрнут и находки есть.
-  defp size_note(true, _clusters), do: nil
-  defp size_note(_extras, []), do: nil
+  defp header([], _ctx), do: "## 🔍 Multi-agent review\n\n✅ No issues found."
 
-  defp size_note(false, _clusters),
-    do:
-      "> ⚠️ Evidence and the fix-all prompt are collapsed — the full output exceeded GitHub's " <>
-        "comment limit (too many findings). The findings are listed below."
-
-  @cut_note "\n\n> ⚠️ …review truncated due to GitHub's comment limit (too many findings)."
-
-  # Последний предохранитель: даже компактный вид не влез — режем по границе строки.
-  # Резервируем РОВНО длину приписываемой пометки (а не «магические» 60), иначе
-  # cut + @cut_note может перелезть лимит на пару символов и нарушить инвариант.
-  defp hard_cap(body) do
-    if String.length(body) <= @max_body do
-      body
-    else
-      keep = @max_body - String.length(@cut_note)
-      cut = body |> String.slice(0, keep) |> String.replace(~r/\n[^\n]*\z/, "")
-      cut <> @cut_note
-    end
-  end
-
-  defp overview(clusters, ctx) do
+  defp header(clusters, ctx) do
     findings = clusters |> Enum.map(&length(&1.items)) |> Enum.sum()
 
-    "Panel: #{ctx.panel_size}/#{ctx.expected} models · " <>
-      "#{findings} findings · #{length(clusters)} clusters · #{breakdown(clusters)}"
+    "## 🔍 Multi-agent review\n\n" <>
+      "**#{findings} findings** in #{length(clusters)} clusters · " <>
+      "panel #{ctx.panel_size}/#{ctx.expected} · #{breakdown(clusters)}"
   end
 
   defp breakdown(clusters) do
@@ -136,146 +119,204 @@ defmodule Aggregator.Render do
   defp gate_line({:pass, reason}), do: "**Status:** ✅ does not block merge — #{reason}"
   defp gate_line({:block, reason}), do: "**Status:** ⛔ blocks merge — #{reason}"
 
-  # --- список находок ---
+  # Индекс находок — однострочный, в дропдауне (CR-стиль: содержательное свёрнуто).
+  defp findings_details([], _ctx), do: nil
 
-  # Все находки — обычными буллетами, без дропдаунов. По решению продукта код-диффы и
-  # промпт уходят в отдельный общий дропдаун, а сам список находок остаётся плоским и
-  # легко сканируемым.
-  defp findings_section([], _ctx), do: "✅ No issues found."
-
-  defp findings_section(clusters, ctx) do
-    bullets = Enum.map(clusters, &("- " <> headline(&1, ctx)))
-    Enum.join(["### Findings (by consensus)" | bullets], "\n")
+  defp findings_details(clusters, ctx) do
+    rows = Enum.map_join(clusters, "\n", &("- " <> index_line(&1, ctx)))
+    details_block("🔎 Findings (#{length(clusters)})", rows)
   end
 
-  defp details_block(summary_line, body) do
-    ["<details>", "<summary>#{summary_line}</summary>", "", body, "", "</details>"]
-    |> Enum.join("\n")
+  defp index_line(%Cluster{} = c, ctx) do
+    "#{consensus_badge(c.consensus, ctx.expected)} · #{c.severity} · #{label(category(c))} · " <>
+      "<code>#{html_escape(location(c))}</code> — #{md_escape(title(c, ctx))}"
   end
 
-  # Шапка находки: severity · уверенность · категория · файл:строка — текст (1 строкой).
-  # Путь — в <code> с экранированием (а не в `бэктики`): корректно и безопасно и в
-  # HTML-контексте <summary>, и в markdown-буллете, даже если путь содержит < > &.
-  defp headline(%Cluster{} = c, ctx) do
-    "#{badge(c, ctx)} · <code>#{html_escape(location(c))}</code> — " <>
-      html_escape(oneline(message(c, ctx)))
+  # Находки вне диффа — отдельный дропдаун с полными записями (инлайн к ним нельзя).
+  defp outside_details([], _ctx, _full?), do: nil
+
+  defp outside_details(clusters, ctx, true) do
+    entries = Enum.map_join(clusters, "\n\n---\n\n", &outside_entry(&1, ctx))
+    details_block("💬 Comments outside the diff (#{length(clusters)})", entries)
   end
 
-  # Блок «сломанный код → предложение» (diff). Только при наличии правки: без
-  # предложения показывать один «сломанный» код незачем (тогда — обычный буллет).
-  defp code_diff_block(%Cluster{} = c, ctx) do
+  # Компактный режим (summary не влез): только индекс вне-диффовых находок.
+  defp outside_details(clusters, ctx, false) do
+    rows = Enum.map_join(clusters, "\n", &("- " <> index_line(&1, ctx)))
+
+    details_block(
+      "💬 Comments outside the diff (#{length(clusters)})",
+      "> ⚠️ Full entries collapsed — output exceeded GitHub's comment limit.\n\n#{rows}"
+    )
+  end
+
+  defp outside_entry(%Cluster{} = c, ctx) do
+    [
+      badge_line(c, ctx),
+      "<code>#{html_escape(location(c))}</code>",
+      finding_text(c, ctx),
+      suggestion_code(c),
+      agent_prompt_details(c, ctx)
+    ]
+    |> Enum.reject(&blank?/1)
+    |> Enum.join("\n\n")
+  end
+
+  # Показ предложения вне диффа — подписанный код-блок (однокликовый suggestion невозможен).
+  defp suggestion_code(%Cluster{} = c) do
     case suggestion(c) do
+      nil -> nil
+      fix -> "Suggested change:\n\n#{fenced(fix, "")}"
+    end
+  end
+
+  # --- инлайн-комменты ---
+
+  defp inline_comment(%Cluster{file: file, line: line} = c, ctx),
+    do: %{path: file, line: line, body: inline_body(c, ctx)}
+
+  defp inline_body(%Cluster{} = c, ctx) do
+    [
+      badge_line(c, ctx),
+      finding_text(c, ctx),
+      found_by(c),
+      committable_suggestion(c),
+      agent_prompt_details(c, ctx)
+    ]
+    |> Enum.reject(&blank?/1)
+    |> Enum.join("\n\n")
+  end
+
+  # Бейдж-строка CR-стиля: _категория_ | _severity_ | _консенсус_ (курсив, через `|`).
+  defp badge_line(%Cluster{severity: sev, consensus: n} = c, ctx) do
+    "_#{category_icon(c)} #{label(category(c))}_ | _#{severity_badge(sev)} #{sev}_ | " <>
+      "_#{consensus_badge(n, ctx.expected)} consensus#{low_conf(n)}_"
+  end
+
+  defp low_conf(1), do: " · low-confidence"
+  defp low_conf(_n), do: ""
+
+  # Заголовок (жирный, 1-е предложение) + проза (остальное). Текст экранируем — тело
+  # коммента markdown: < открыл бы HTML-тег, а _/* — паразитный курсив.
+  defp finding_text(%Cluster{} = c, ctx) do
+    {head, rest} = split_message(message(c, ctx))
+    bold = "**#{md_escape(headline_text(head))}**"
+
+    case rest && oneline(rest) do
+      prose when is_binary(prose) and prose != "" -> "#{bold}\n\n#{md_escape(prose)}"
+      _ -> bold
+    end
+  end
+
+  defp title(%Cluster{} = c, ctx),
+    do: c |> message(ctx) |> split_message() |> elem(0) |> headline_text()
+
+  # Пустой/пробельный заголовок (схема допускает message из пробелов) → плейсхолдер,
+  # иначе вышел бы пустой жирный `****`.
+  defp headline_text(head) do
+    case oneline(head) do
+      "" -> "(no description)"
+      t -> t
+    end
+  end
+
+  # Делим сообщение на «заголовок» (1-е предложение) и «прозу» ТОЛЬКО при уверенной
+  # границе: .!? + пробел + Заглавная/цифра, и голова не оканчивается распространённым
+  # сокращением (e.g./i.e./etc. …). Иначе всё — заголовок (без ложного разрыва).
+  defp split_message(msg) do
+    case Regex.run(~r/^(.+?[.!?])\s+([A-Z0-9].*)$/su, msg) do
+      [_, head, rest] -> if abbrev_tail?(head), do: {msg, nil}, else: {head, rest}
+      _ -> {msg, nil}
+    end
+  end
+
+  defp abbrev_tail?(head), do: Regex.match?(@abbrev_tail, String.trim(head))
+
+  defp found_by(%Cluster{items: items}) do
+    agents = items |> Enum.map(& &1.agent) |> Enum.uniq() |> Enum.join(", ")
+    "<sub>found by: #{agents}</sub>"
+  end
+
+  # Однокликовый suggestion — ТОЛЬКО из находки на якорной строке кластера (её и
+  # прокомментировали; GitHub применит правку к этой строке). Если правка есть, но с
+  # другой строки окна — отдаём не как committable, а как подписанный код-блок (и она
+  # всё равно попадёт в промпт). Так «Commit suggestion» не затрёт не ту строку.
+  defp committable_suggestion(%Cluster{} = c) do
+    case anchored_suggestion(c) do
       nil ->
-        nil
+        non_anchored_hint(c)
 
       fix ->
-        broken = broken_code(c, ctx)
-        sides = Enum.reject([diff_side(broken, "-"), diff_side(fix, "+")], &is_nil/1)
-        fence = fence_for(Enum.reject([broken, fix], &is_nil/1))
-        "#{fence}diff\n#{Enum.join(sides, "\n")}\n#{fence}"
+        if String.contains?(fix, "```"),
+          do: details_block("📝 Suggested change (not auto-committable)", fenced(fix, "")),
+          else: details_block("📝 Committable suggestion", "```suggestion\n#{fix}\n```")
     end
   end
 
-  defp diff_side(nil, _marker), do: nil
-
-  defp diff_side(text, marker),
-    do: text |> String.split(["\r\n", "\n"]) |> Enum.map_join("\n", &"#{marker} #{&1}")
-
-  defp broken_code(%Cluster{file: file, line: line}, ctx),
-    do: Diff.line_content(ctx.diff_index, file, line)
-
-  # --- общий дропдаун: код-доказательства + промпт «исправь всё» ---
-
-  defp action_section([], _ctx), do: nil
-
-  defp action_section(clusters, ctx) do
-    body =
-      [evidence_block(clusters, ctx), prompt_block(clusters, ctx)]
-      |> Enum.reject(&blank?/1)
-      |> Enum.join("\n\n")
-
-    details_block("🛠 Code evidence and an AI-agent prompt to fix all findings", body)
-  end
-
-  # «Сломанный код → предложенная правка» по каждой находке, у которой есть правка.
-  # Находки без suggestion сюда не попадают (нечего показывать в +стороне) — они уже
-  # перечислены буллетами в списке находок.
-  defp evidence_block(clusters, ctx) do
-    clusters
-    |> Enum.map(fn c -> {c, code_diff_block(c, ctx)} end)
-    |> Enum.reject(fn {_c, diff} -> is_nil(diff) end)
-    |> case do
-      [] ->
-        nil
-
-      pairs ->
-        entries = Enum.map(pairs, fn {c, diff} -> evidence_entry(c, ctx, diff) end)
-        Enum.join(["#### Broken code → suggested fix" | entries], "\n\n")
+  # Есть правка, но не с якорной строки → показываем как подписанный (не однокликовый)
+  # блок, чтобы код-доказательство не терялось, но и не коммитилось не туда.
+  defp non_anchored_hint(%Cluster{} = c) do
+    case suggestion(c) do
+      nil -> nil
+      fix -> details_block("📝 Suggested change (not auto-committable)", fenced(fix, ""))
     end
   end
 
-  defp evidence_entry(%Cluster{} = c, ctx, diff) do
-    head =
-      "**<code>#{html_escape(location(c))}</code>** — #{html_escape(oneline(message(c, ctx)))}"
-
-    "#{head}\n\n#{diff}"
+  defp anchored_suggestion(%Cluster{items: items, line: line}) do
+    Enum.find_value(items, fn f ->
+      if f.line == line and f.suggestion not in [nil, ""], do: f.suggestion
+    end)
   end
 
-  defp prompt_block(clusters, ctx) do
-    prompt = fix_all_prompt(clusters, ctx)
-    fence = fence_for([prompt])
-    "#### Prompt\n\n#{fence}text\n#{prompt}\n#{fence}"
-  end
+  defp agent_prompt_details(%Cluster{} = c, ctx),
+    do: details_block("🤖 Prompt for AI agent", fenced(agent_prompt(c, ctx), ""))
 
-  defp fix_all_prompt(clusters, ctx) do
-    intro =
-      "Fix the problems listed below. Make minimal, targeted changes; preserve behavior " <>
-        "and style; do not touch unrelated code. For each: file:line, the issue, and the " <>
-        "direction of the fix."
-
-    items =
-      clusters
-      |> Enum.with_index(1)
-      |> Enum.map_join("\n\n", fn {c, i} -> fix_all_item(c, ctx, i) end)
-
-    "#{intro}\n\n#{items}"
-  end
-
-  defp fix_all_item(%Cluster{severity: sev} = c, ctx, i) do
-    head = "#{i}. #{location(c)} [#{sev}/#{category(c)}] — #{oneline(message(c, ctx))}"
+  defp agent_prompt(%Cluster{} = c, ctx) do
+    base = "In #{location(c)}, #{oneline(message(c, ctx))}"
 
     case suggestion(c) do
-      nil -> head
-      fix -> "#{head}\n   suggestion:\n#{indent(fix)}"
+      nil -> base <> " Make a minimal, targeted fix that preserves behavior and style."
+      fix -> base <> "\nSuggested direction:\n#{fix}"
     end
-  end
-
-  defp indent(text),
-    do: text |> String.split(["\r\n", "\n"]) |> Enum.map_join("\n", &"     #{&1}")
-
-  # Decision-aware: must not claim "advisory" when fail_on is actually blocking this
-  # merge (and vice versa). Stance is derived from the gate decision, not hard-coded.
-  defp footer({decision, _reason}) do
-    stance =
-      case decision do
-        :block -> "blocking this merge (per `fail_on`)"
-        :pass -> "advisory — not blocking merge"
-      end
-
-    "<sub>Independent AI panel · #{stance}. Re-run with `/rerun-review` in a PR comment.</sub>"
   end
 
   # --- общие хелперы ---
 
-  # Denominator is the FULL panel (`expected`), not the agents that actually ran:
-  # honest coverage. With a failed agent the max consensus is < expected → never
-  # green (yellow at best); the failed-agent banner explains the missing vote.
-  defp badge(%Cluster{severity: sev, consensus: n} = c, ctx),
-    do: "**#{sev}** · #{confidence(n, ctx.expected)} · #{category(c)}"
+  defp details_block(summary_line, body),
+    do: "<details>\n<summary>#{summary_line}</summary>\n\n#{body}\n\n</details>"
 
-  defp confidence(1, panel), do: "🔴 1/#{panel} · low-confidence"
-  defp confidence(n, panel) when n >= panel, do: "🟢 #{n}/#{panel}"
-  defp confidence(n, panel), do: "🟡 #{n}/#{panel}"
+  # Код-блок с переменной длиной забора (≥3 бэктика, длиннее любой серии внутри текста).
+  defp fenced(text, lang) do
+    fence = fence_for([text])
+    "#{fence}#{lang}\n#{text}\n#{fence}"
+  end
+
+  defp consensus_badge(n, expected), do: "#{circle(n, expected)} #{n}/#{expected}"
+
+  # Одна модель = всегда low-confidence (красный), даже если панель из одной модели.
+  defp circle(1, _expected), do: "🔴"
+  defp circle(n, expected) when n >= expected, do: "🟢"
+  defp circle(_n, _expected), do: "🟡"
+
+  defp severity_badge("P0"), do: "🔴"
+  defp severity_badge("P1"), do: "🟠"
+  defp severity_badge("P2"), do: "🟡"
+  defp severity_badge(_other), do: "⚪"
+
+  defp category_icon(%Cluster{} = c) do
+    case primary_category(c) do
+      "security" -> "🔒"
+      "bug" -> "🐛"
+      "performance" -> "⚡"
+      "design" -> "📐"
+      "test" -> "🧪"
+      "style" -> "🎨"
+      _other -> "🔎"
+    end
+  end
+
+  defp primary_category(%Cluster{items: items}),
+    do: items |> Enum.map(& &1.category) |> Enum.find(&(&1 not in [nil, ""]))
 
   defp category(%Cluster{items: items}) do
     items
@@ -291,7 +332,7 @@ defmodule Aggregator.Render do
   defp location(%Cluster{file: file, line: nil}), do: file
   defp location(%Cluster{file: file, line: line}), do: "#{file}:#{line}"
 
-  # Первый непустой suggestion среди findings кластера.
+  # Первый непустой suggestion среди findings кластера (для промпта/вне-диффовой записи).
   defp suggestion(%Cluster{items: items}),
     do:
       Enum.find_value(items, fn f ->
@@ -313,9 +354,19 @@ defmodule Aggregator.Render do
     end
   end
 
-  # Забор (≥3 бэктика) длиннее самой длинной серии бэктиков внутри текста: иначе
-  # код, сам содержащий ```, закрыл бы блок раньше → битый markdown. Переменная
-  # длина забора — стандартный CommonMark-приём.
+  # Decision-aware: не врать «advisory», когда fail_on реально блокирует merge.
+  defp footer({decision, _reason}) do
+    stance =
+      case decision do
+        :block -> "blocking this merge (per `fail_on`)"
+        :pass -> "advisory — not blocking merge"
+      end
+
+    "<sub>Independent AI panel · #{stance}. Re-run with `/rerun-review` in a PR comment.</sub>"
+  end
+
+  # Забор (≥3 бэктика) длиннее самой длинной серии бэктиков внутри текста — иначе код,
+  # сам содержащий ```, закрыл бы блок раньше. Стандартный CommonMark-приём.
   defp fence_for(texts) do
     longest =
       texts
@@ -325,6 +376,15 @@ defmodule Aggregator.Render do
 
     String.duplicate("`", max(3, longest + 1))
   end
+
+  # Текст для бейджа/индекса: HTML + markdown-эмфазис экранированы, `|` → `/` (чтобы не
+  # путался с разделителем бейджа и не триггерил pipe-таблицы GitHub).
+  defp label(text), do: text |> md_escape() |> String.replace("|", "/")
+
+  # html_escape + нейтрализация markdown-эмфазиса (_ *), т.к. текст модели попадает в
+  # markdown-контекст (жирный заголовок, курсивный бейдж). Бэктики НЕ трогаем — пусть
+  # code-спаны модели рендерятся как код.
+  defp md_escape(text), do: text |> html_escape() |> String.replace(~r/[_*]/, &("\\" <> &1))
 
   defp html_escape(text) do
     text
@@ -337,5 +397,24 @@ defmodule Aggregator.Render do
 
   defp blank?(nil), do: true
   defp blank?(""), do: true
-  defp blank?(_), do: false
+  defp blank?(_other), do: false
+
+  # Последний предохранитель: даже компактный summary не влез — режем по границе строки,
+  # дозакрываем висящие <details> (иначе коммент «съезжает») и приписываем пометку.
+  # Резервируем запас под закрывающие теги и пометку, чтобы не перелезть лимит.
+  defp hard_cap(body) do
+    if String.length(body) <= @max_body do
+      body
+    else
+      keep = @max_body - String.length(@cut_note) - 64
+      cut = body |> String.slice(0, keep) |> String.replace(~r/\n[^\n]*\z/, "")
+      cut <> close_dangling(cut) <> @cut_note
+    end
+  end
+
+  defp close_dangling(text) do
+    opens = length(Regex.scan(~r/<details>/, text))
+    closes = length(Regex.scan(~r|</details>|, text))
+    String.duplicate("\n</details>", max(0, opens - closes))
+  end
 end
