@@ -214,6 +214,10 @@ jobs:
           reviews-dir: _artifacts
           diff-path: _artifacts/diff/diff.patch
           fail-on: ${{ vars.FAIL_ON || 'none' }}
+          # Токен для Polish: claude CLI в контейнере причёсывает прозу. Без него
+          # (или при сбое) Aggregator.Claude молча деградирует к детерминированному тексту.
+          claude-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          polish-model: ${{ vars.CLAUDE_MODEL || 'claude-opus-4-8' }}
           # Панель зависит от того, включён ли Codex: 3/3 при ENABLE_CODEX, иначе 2/2
           # (чтобы не маячило вечное «codex не отработал», когда его и не звали).
           expected-agents: ${{ vars.ENABLE_CODEX == 'true' && 'claude,codex,deepseek' || 'claude,deepseek' }}
