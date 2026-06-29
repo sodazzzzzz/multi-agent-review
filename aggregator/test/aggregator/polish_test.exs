@@ -135,7 +135,7 @@ defmodule Aggregator.PolishTest do
         ])
 
       p = Polish.prompt(cs)
-      assert p =~ "СТРОГО JSON"
+      assert p =~ "STRICTLY with a JSON"
       assert p =~ "lib/a.ex"
       assert p =~ ~s("id":1)
       assert p =~ "плохо"
