@@ -33,7 +33,7 @@ jobs:
         run: bash scripts/codex_auth.sh restore
       - name: Warmup run (рефреш токена)
         run: |
-          codex exec -s read-only -a never --skip-git-repo-check --ephemeral "Reply with OK" >/dev/null
+          codex exec -s read-only --skip-git-repo-check --ephemeral "Reply with OK" >/dev/null
       - name: Persist refreshed Codex auth
         if: always()
         env:
