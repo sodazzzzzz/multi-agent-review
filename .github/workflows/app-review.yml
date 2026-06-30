@@ -1,0 +1,324 @@
+name: app-review (central)
+
+# Центральный GitHub App: ревьюит СТОРОННИЕ репо из REPO_ALLOWLIST. Воркфлоу выполняется
+# ЗДЕСЬ (секреты централизованы), токен App'а выпускается прямо в раннере — хостинг-сервер
+# не нужен. Спит, пока не выставлена vars.ENABLE_APP_REVIEW=true. Подробности — docs/SETUP.md.
+#
+# Граф: discover (найти PR по всем allowlist-репо + дедуп + Check Run in_progress) →
+# review_stateless [matrix, параллельно: Claude+DeepSeek] + review_codex [ОДИН job,
+# последовательно: общий одноразовый токен] → aggregate [matrix: постинг + Check Run completed].
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Точечно: owner/repo (пусто → все из REPO_ALLOWLIST)"
+        required: false
+        default: ""
+      pr:
+        description: "Точечно: номер PR (пусто → все открытые)"
+        required: false
+        default: ""
+
+# GITHUB_TOKEN нужен только для checkout ЭТОГО публичного репо (scripts/). В целевые репо
+# ходим токеном App'а, который выпускаем из APP_ID/APP_PRIVATE_KEY.
+permissions:
+  contents: read
+
+# Сериализуем прогоны app-review (cron-тики не должны накладываться). codex-джоб вдобавок
+# в группе codex-auth (общей с codex-warmup) — см. ниже.
+concurrency:
+  group: app-review
+  cancel-in-progress: false
+
+jobs:
+  # Найти открытые PR во всех allowlist-репо, отсеять уже отревьюенные (по нашему Check Run
+  # на head-коммите) и завести Check Run in_progress. Токены целевых репо выпускаем из
+  # app-JWT (его — из приватного ключа App'а прямо здесь).
+  discover:
+    if: ${{ vars.ENABLE_APP_REVIEW == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.scan.outputs.matrix }}
+      has_work: ${{ steps.scan.outputs.has_work }}
+    steps:
+      - id: scan
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          ALLOWLIST: ${{ vars.REPO_ALLOWLIST }}
+          ONLY_REPO: ${{ github.event.inputs.repo }}
+          ONLY_PR: ${{ github.event.inputs.pr }}
+        run: |
+          set -euo pipefail
+          b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+          # workflow_dispatch pr без repo фанаутил бы один номер по всем allowlist-репо — запрет.
+          if [ -n "$ONLY_PR" ] && [ -z "$ONLY_REPO" ]; then
+            echo "::error::input 'pr' требует input 'repo'"; exit 1
+          fi
+
+          # app-JWT (RS256, ttl 9 мин): iss=App ID, подпись приватным ключом App'а.
+          now=$(date +%s)
+          hdr=$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)
+          pld=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$((now - 60))" "$((now + 540))" "$APP_ID" | b64url)
+          sig=$(printf '%s' "$hdr.$pld" | openssl dgst -sha256 -sign <(printf '%s' "$APP_PRIVATE_KEY") | b64url)
+          jwt="$hdr.$pld.$sig"
+
+          repos="${ONLY_REPO:-$(printf '%s' "$ALLOWLIST" | tr ',' ' ')}"
+          matrix='[]'
+          for repo in $repos; do
+            repo="$(printf '%s' "$repo" | tr -d '[:space:]')"
+            [ -z "$repo" ] && continue
+            name="${repo#*/}"
+
+            # Установка App'а на этот репо (по JWT). Нет установки → пропускаем (не в allowlist
+            # смысле, а просто App туда не поставлен).
+            inst="$(GH_TOKEN="$jwt" gh api "repos/$repo/installation" --jq '.id' 2>/dev/null)" \
+              || { echo "::warning::App не установлен на $repo — пропуск"; continue; }
+
+            # Installation-токен, ограниченный этим репо.
+            tok="$(GH_TOKEN="$jwt" gh api -X POST "app/installations/$inst/access_tokens" \
+                    -f "repositories[]=$name" --jq '.token' 2>/dev/null)" \
+              || { echo "::warning::не выпустить токен для $repo — пропуск"; continue; }
+
+            if [ -n "$ONLY_PR" ]; then
+              prs="$ONLY_PR"
+            else
+              # || true: archived/нет прав/rate-limit на ОДНОМ репо не должен валить весь прогон.
+              prs="$(GH_TOKEN="$tok" gh pr list -R "$repo" --state open --json number --jq '.[].number' || true)"
+            fi
+
+            for pr in $prs; do
+              head="$(GH_TOKEN="$tok" gh api "repos/$repo/pulls/$pr" --jq '.head.sha' 2>/dev/null)" \
+                || { echo "::warning::нет PR $repo#$pr — пропуск"; continue; }
+              # Дедуп: наш Check Run уже на этом head → этот head уже отревьюен (новый пуш =
+              # новый head = новый прогон). Фильтр по имени нашего чека.
+              seen="$(GH_TOKEN="$tok" gh api "repos/$repo/commits/$head/check-runs" \
+                       --jq '[.check_runs[] | select(.name == "multi-agent-review")] | length' 2>/dev/null || echo 0)"
+              if [ "$seen" != "0" ]; then
+                echo "skip $repo#$pr@${head:0:7} — уже отревьюено"
+                continue
+              fi
+
+              crid="$(GH_TOKEN="$tok" gh api -X POST "repos/$repo/check-runs" \
+                       -f name='multi-agent-review' -f head_sha="$head" -f status='in_progress' --jq '.id' 2>/dev/null)" \
+                || { echo "::warning::не создать check-run $repo#$pr — пропуск"; continue; }
+              # slug — хэш owner/repo#pr: без коллизий даже при дефисах в имени; валиден как имя артефакта.
+              slug="$(printf '%s#%s' "$repo" "$pr" | sha1sum | cut -c1-16)"
+              matrix="$(printf '%s' "$matrix" | jq -c \
+                --arg r "$repo" --arg o "${repo%/*}" --arg n "$name" --argjson p "$pr" \
+                --arg h "$head" --arg c "$crid" --arg s "$slug" \
+                '. + [{repo:$r, owner:$o, name:$n, pr:$p, head:$h, check_run_id:$c, slug:$s}]')"
+              echo "queued $repo#$pr@${head:0:7} (slug=$slug)"
+            done
+          done
+
+          n="$(printf '%s' "$matrix" | jq 'length')"
+          {
+            echo "matrix={\"include\":$matrix}"
+            echo "has_work=$([ "$n" -gt 0 ] && echo true || echo false)"
+          } >>"$GITHUB_OUTPUT"
+          echo "discover: $n PR(ов) к ревью"
+
+  # Stateless-агенты (Claude + DeepSeek) — параллельно по всем PR. Скрипты репо-агностичны,
+  # берём дифф удалённо токеном App'а (без чекаута целевого репо).
+  review_stateless:
+    needs: discover
+    if: needs.discover.outputs.has_work == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    steps:
+      - name: App token (target repo)
+        id: tok
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ matrix.owner }}
+          repositories: ${{ matrix.name }}
+      - name: Checkout scripts
+        uses: actions/checkout@v7
+      - name: Fetch PR diff (remote)
+        env:
+          GH_TOKEN: ${{ steps.tok.outputs.token }}
+          REPO: ${{ matrix.repo }}
+          PR: ${{ matrix.pr }}
+        run: |
+          set -euo pipefail
+          # .diff media type — best-effort: на огромных диффах GitHub отдаёт JSON-объект PR
+          # (или 406), а gh при 200 не падает. Поэтому проверяем СОДЕРЖИМОЕ, не код возврата.
+          gh api "repos/$REPO/pulls/$PR" -H "Accept: application/vnd.github.diff" >diff.patch 2>/dev/null || true
+          if ! head -c 64 diff.patch | grep -q '^diff --git'; then
+            echo "дифф не отдан media type (большой PR?) — partial clone fallback"
+            read -r base head < <(gh api "repos/$REPO/pulls/$PR" --jq '"\(.base.sha) \(.head.sha)"')
+            git clone --no-checkout --filter=blob:none \
+              "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" _t
+            git -C _t fetch --no-tags origin "$base" "refs/pull/$PR/head"
+            git -C _t diff "$base...$head" >diff.patch
+          fi
+          wc -l diff.patch
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+      - name: Claude
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL }}
+        run: bash scripts/review_claude.sh diff.patch review-claude.json
+      - name: DeepSeek
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_BASE_URL: ${{ vars.DEEPSEEK_BASE_URL }}
+          DEEPSEEK_MODEL: ${{ vars.DEEPSEEK_MODEL }}
+        run: bash scripts/review_deepseek.sh diff.patch review-deepseek.json
+      - name: Upload (diff + stateless reviews)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rev-${{ matrix.slug }}
+          path: |
+            diff.patch
+            review-claude.json
+            review-deepseek.json
+          if-no-files-found: ignore
+
+  # Codex — ОДИН job, последовательно по всем PR. Общий одноразовый refresh-токен: restore
+  # один раз → exec по каждому диффу → persist один раз. concurrency codex-auth (общая с
+  # codex-warmup) + единый job исключают параллельный рефреш. Токен GitHub НЕ нужен — Codex
+  # ест только дифф (артефакт rev-*) и постит не он, а aggregate.
+  review_codex:
+    needs: [discover, review_stateless]
+    if: always() && needs.discover.outputs.has_work == 'true' && vars.ENABLE_CODEX == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: codex-auth
+      cancel-in-progress: false
+    env:
+      CODEX_HOME: ${{ github.workspace }}/.codex
+    steps:
+      - name: Checkout scripts
+        uses: actions/checkout@v7
+      - name: Download diffs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rev-*
+          path: _revs
+      - name: Install Codex CLI
+        run: npm install -g @openai/codex
+      - name: Restore Codex auth
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+        run: bash scripts/codex_auth.sh restore
+      - name: Codex review (sequential over all PRs)
+        env:
+          CODEX_MODEL: ${{ vars.CODEX_MODEL }}
+        run: |
+          set -uo pipefail
+          shopt -s nullglob
+          mkdir -p codexout
+          for d in _revs/rev-*/; do
+            slug="$(basename "$d")"; slug="${slug#rev-}"
+            echo "=== codex: $slug ==="
+            bash scripts/review_codex.sh "${d}diff.patch" "codexout/review-codex-${slug}.json" \
+              || echo "::warning::codex не отработал для $slug"
+          done
+      - name: Persist refreshed Codex auth
+        if: always()
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          GH_TOKEN: ${{ secrets.CODEX_SECRETS_PAT }}
+        run: bash scripts/codex_auth.sh persist
+      - name: Upload codex reviews
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-all
+          path: codexout/
+          if-no-files-found: ignore
+
+  # Сводим находки и постим обзор+инлайны в целевой PR токеном App'а (личность бота),
+  # закрываем Check Run. matrix по PR — параллельно (постинг stateless).
+  aggregate:
+    needs: [discover, review_stateless, review_codex]
+    if: always() && needs.discover.outputs.has_work == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    steps:
+      - name: App token (target repo)
+        id: tok
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ matrix.owner }}
+          repositories: ${{ matrix.name }}
+      - name: Download stateless (diff + claude + deepseek)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: rev-${{ matrix.slug }}
+          path: _in
+      - name: Download codex (если был)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: codex-all
+          path: _codex
+      - name: Assemble reviews dir
+        id: guard
+        run: |
+          cp "_codex/review-codex-${{ matrix.slug }}.json" _in/ 2>/dev/null || true
+          # diff.patch есть → review_stateless отработал (даже если находок нет). Нет → джоб
+          # упал, постить нечего: Check Run = neutral «incomplete», а не ложный success.
+          if [ -f _in/diff.patch ]; then echo "ok=1" >>"$GITHUB_OUTPUT"; else echo "ok=0" >>"$GITHUB_OUTPUT"; fi
+      - name: Aggregate & post
+        id: aggregate
+        if: steps.guard.outputs.ok == '1'
+        continue-on-error: true
+        uses: sodazzzzzz/multi-agent-review@v0.2.0
+        with:
+          github-token: ${{ steps.tok.outputs.token }}
+          target-repo: ${{ matrix.repo }}
+          pr-number: ${{ matrix.pr }}
+          reviews-dir: _in
+          diff-path: _in/diff.patch
+          fail-on: ${{ vars.FAIL_ON || 'none' }}
+          claude-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          polish-model: ${{ vars.CLAUDE_MODEL || 'claude-opus-4-8' }}
+          expected-agents: ${{ vars.ENABLE_CODEX == 'true' && 'claude,codex,deepseek' || 'claude,deepseek' }}
+      - name: Complete check run
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.tok.outputs.token }}
+          REPO: ${{ matrix.repo }}
+          CRID: ${{ matrix.check_run_id }}
+          GUARD_OK: ${{ steps.guard.outputs.ok }}
+          BLOCKING: ${{ steps.aggregate.outputs.blocking }}
+          CLUSTERS: ${{ steps.aggregate.outputs.clusters }}
+          SUMMARY_URL: ${{ steps.aggregate.outputs.summary_url }}
+          OUTCOME: ${{ steps.aggregate.outcome }}
+        run: |
+          set -uo pipefail
+          if [ "${GUARD_OK:-0}" != "1" ]; then
+            # review_stateless не дал артефакт (джоб упал) → aggregate скипнут: НЕ ложный
+            # success, а neutral «incomplete».
+            concl=neutral; title="Review incomplete — нет результатов агентов"
+          elif [ "$OUTCOME" = "failure" ] && [ -z "${BLOCKING:-}" ]; then
+            concl=neutral; title="Review error"        # экшен упал (не gate-блок)
+          elif [ "${BLOCKING:-false}" = "true" ]; then
+            concl=failure; title="Blocking findings"
+          elif [ "${CLUSTERS:-0}" != "0" ]; then
+            concl=neutral; title="${CLUSTERS} finding cluster(s) — advisory"
+          else
+            concl=success; title="No issues found"
+          fi
+          jq -n --arg c "$concl" --arg t "$title" \
+            --arg s "Multi-agent review — подробности: ${SUMMARY_URL:-см. комментарии PR}." \
+            '{status: "completed", conclusion: $c, output: {title: $t, summary: $s}}' \
+            | gh api -X PATCH "repos/$REPO/check-runs/$CRID" --input -
