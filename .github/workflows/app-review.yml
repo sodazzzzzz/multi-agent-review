@@ -298,13 +298,18 @@ jobs:
           GH_TOKEN: ${{ steps.tok.outputs.token }}
           REPO: ${{ matrix.repo }}
           CRID: ${{ matrix.check_run_id }}
+          GUARD_OK: ${{ steps.guard.outputs.ok }}
           BLOCKING: ${{ steps.aggregate.outputs.blocking }}
           CLUSTERS: ${{ steps.aggregate.outputs.clusters }}
           SUMMARY_URL: ${{ steps.aggregate.outputs.summary_url }}
           OUTCOME: ${{ steps.aggregate.outcome }}
         run: |
           set -uo pipefail
-          if [ "$OUTCOME" = "failure" ] && [ -z "${BLOCKING:-}" ]; then
+          if [ "${GUARD_OK:-0}" != "1" ]; then
+            # review_stateless не дал артефакт (джоб упал) → aggregate скипнут: НЕ ложный
+            # success, а neutral «incomplete».
+            concl=neutral; title="Review incomplete — нет результатов агентов"
+          elif [ "$OUTCOME" = "failure" ] && [ -z "${BLOCKING:-}" ]; then
             concl=neutral; title="Review error"        # экшен упал (не gate-блок)
           elif [ "${BLOCKING:-false}" = "true" ]; then
             concl=failure; title="Blocking findings"
