@@ -57,6 +57,29 @@ defmodule Aggregator.RenderTest do
     end
   end
 
+  describe "маркер и реран-чекбокс" do
+    test "скрытый маркер всегда в теле обзора (по нему discover дедупит снаружи)" do
+      assert Render.render([]).summary =~ Render.summary_marker()
+
+      assert Render.render(Cluster.build([finding(line: 1)])).summary =~
+               "<!-- multi-agent-review -->"
+    end
+
+    test "rerun: true → чекбокс ререрана + футер «tick the box above», без /rerun-review" do
+      out = Render.render(Cluster.build([finding(line: 1)]), %{rerun: true})
+      assert out.summary =~ "- [ ] 🔄 **Re-run review**"
+      assert out.summary =~ "Re-run: tick the box above."
+      refute out.summary =~ "/rerun-review"
+    end
+
+    test "по умолчанию (rerun: false) — без чекбокса, футер с /rerun-review" do
+      out = Render.render(Cluster.build([finding(line: 1)]))
+      refute out.summary =~ "Re-run review**"
+      refute out.summary =~ "- [ ] 🔄"
+      assert out.summary =~ "/rerun-review"
+    end
+  end
+
   describe "индекс находок (свёрнутый дропдаун)" do
     test "находки — в <details> Findings, по строке на кластер" do
       clusters =

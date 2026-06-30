@@ -34,6 +34,11 @@ defmodule Aggregator.Render do
 
   @full_panel 3
 
+  # Скрытый маркер в теле обзор-коммента — по нему discover (app-review.yml) находит НАШИ
+  # комменты: дедуп «PR уже отревьюен» (нет авто-перепрогона) и детект галки ререрана.
+  # Невидим в рендере, но возвращается raw-телом через API.
+  @marker "<!-- multi-agent-review -->"
+
   # Лимит тела issue-коммента GitHub — 65536; держим запас. Summary теперь компактный
   # (индекс + свёрнутые секции), но «Comments outside diff» на огромном PR может пробить
   # лимит → деградируем (полные записи → индекс) и в крайнем случае усекаем.
@@ -43,6 +48,10 @@ defmodule Aggregator.Render do
 
   # Голова «1-го предложения» оканчивается распространённым сокращением → НЕ граница.
   @abbrev_tail ~r/\b(e\.g|i\.e|etc|vs|cf|al|Mr|Mrs|Ms|Dr|Prof|No|Fig|Eq|Sec|Ch|Inc|Ltd)\.$/i
+
+  @doc "Скрытый маркер наших обзор-комментов (для дедупа/ререрана снаружи воркфлоу)."
+  @spec summary_marker() :: String.t()
+  def summary_marker, do: @marker
 
   @doc "Построить обзор-коммент (`summary`) + инлайн-комменты (`comments`) из кластеров."
   @spec render([Cluster.t()], map()) :: output()
@@ -62,7 +71,8 @@ defmodule Aggregator.Render do
       failed_agents: Map.get(context, :failed_agents, []),
       decision: Map.get(context, :decision, {:pass, "advisory"}),
       messages: Map.get(context, :messages, %{}),
-      walkthrough: Map.get(context, :walkthrough, nil)
+      walkthrough: Map.get(context, :walkthrough, nil),
+      rerun: Map.get(context, :rerun, false)
     }
   end
 
@@ -102,13 +112,15 @@ defmodule Aggregator.Render do
     outside = for {c, nil} <- tagged, do: c
 
     [
+      @marker,
       header(clusters, ctx),
       failed_banner(ctx.failed_agents),
       gate_line(ctx.decision),
       walkthrough_details(ctx.walkthrough),
       findings_details(tagged, ctx),
       outside_details(outside, ctx, full?),
-      footer(ctx.decision)
+      rerun_box(ctx.rerun),
+      footer(ctx.decision, ctx.rerun)
     ]
     |> Enum.reject(&blank?/1)
     |> Enum.join("\n\n")
@@ -435,15 +447,30 @@ defmodule Aggregator.Render do
     end
   end
 
+  # Кликабельный реран (app-режим): чекбокс в обзоре. Пользователь с write-доступом ставит
+  # галку → discover (app-review.yml) при следующем проходе снимает её и постит НОВЫЙ обзор.
+  # В само-ревью (rerun=false) не показываем — там перезапуск по команде /rerun-review.
+  defp rerun_box(false), do: nil
+
+  defp rerun_box(true),
+    do:
+      "- [ ] 🔄 **Re-run review** — tick this box (write access required); the bot clears it " <>
+        "and posts a fresh review on its next pass."
+
   # Decision-aware: не врать «advisory», когда fail_on реально блокирует merge.
-  defp footer({decision, _reason}) do
+  defp footer({decision, _reason}, rerun?) do
     stance =
       case decision do
         :block -> "blocking this merge (per `fail_on`)"
         :pass -> "advisory — not blocking merge"
       end
 
-    "<sub>Independent AI panel · #{stance}. Re-run with `/rerun-review` in a PR comment.</sub>"
+    rerun_hint =
+      if rerun?,
+        do: "Re-run: tick the box above.",
+        else: "Re-run with `/rerun-review` in a PR comment."
+
+    "<sub>Independent AI panel · #{stance}. #{rerun_hint}</sub>"
   end
 
   # Забор (≥3 бэктика) длиннее самой длинной серии бэктиков внутри текста — иначе код,

@@ -96,13 +96,23 @@ jobs:
             for pr in $prs; do
               head="$(GH_TOKEN="$tok" gh api "repos/$repo/pulls/$pr" --jq '.head.sha' 2>/dev/null)" \
                 || { echo "::warning::нет PR $repo#$pr — пропуск"; continue; }
-              # Дедуп: наш Check Run уже на этом head → этот head уже отревьюен (новый пуш =
-              # новый head = новый прогон). Фильтр по имени нашего чека.
-              seen="$(GH_TOKEN="$tok" gh api "repos/$repo/commits/$head/check-runs" \
-                       --jq '[.check_runs[] | select(.name == "multi-agent-review")] | length' 2>/dev/null || echo 0)"
-              if [ "$seen" != "0" ]; then
-                echo "skip $repo#$pr@${head:0:7} — уже отревьюено"
-                continue
+              # Дедуп НА УРОВНЕ PR (без авто-перепрогона): берём ПОСЛЕДНИЙ наш обзор-коммент
+              # по скрытому маркеру. Есть, и галка ререрана НЕ стоит → пропускаем (новые
+              # коммиты сами ревью НЕ перезапускают). Галка `[x]` → ручной реран: снимаем её
+              # (one-shot, иначе зациклится) и ревьюим заново — постнётся НОВЫЙ коммент.
+              cid="$(GH_TOKEN="$tok" gh api --paginate "repos/$repo/issues/$pr/comments" \
+                       --jq '.[] | select(.body | contains("<!-- multi-agent-review -->")) | .id' 2>/dev/null | tail -1 || true)"
+              if [ -n "$cid" ]; then
+                cbody="$(GH_TOKEN="$tok" gh api "repos/$repo/issues/comments/$cid" --jq '.body' 2>/dev/null || true)"
+                if printf '%s' "$cbody" | grep -qE '^- \[[xX]\]'; then
+                  newbody="$(printf '%s' "$cbody" | sed -E 's/^- \[[xX]\]/- [ ]/')"
+                  jq -n --arg b "$newbody" '{body:$b}' \
+                    | GH_TOKEN="$tok" gh api -X PATCH "repos/$repo/issues/comments/$cid" --input - >/dev/null 2>&1 || true
+                  echo "rerun $repo#$pr — галка снята, ревьюим заново"
+                else
+                  echo "skip $repo#$pr — уже отревьюено (реран не запрошен)"
+                  continue
+                fi
               fi
 
               crid="$(GH_TOKEN="$tok" gh api -X POST "repos/$repo/check-runs" \
@@ -284,10 +294,11 @@ jobs:
         id: aggregate
         if: steps.guard.outputs.ok == '1'
         continue-on-error: true
-        uses: sodazzzzzz/multi-agent-review@v0.2.0
+        uses: sodazzzzzz/multi-agent-review@v0.3.0
         with:
           github-token: ${{ steps.tok.outputs.token }}
           target-repo: ${{ matrix.repo }}
+          rerun-checkbox: true
           pr-number: ${{ matrix.pr }}
           reviews-dir: _in
           diff-path: _in/diff.patch

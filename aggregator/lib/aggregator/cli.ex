@@ -38,7 +38,8 @@ defmodule Aggregator.CLI do
   Выполнить прогон с явными зависимостями. Возвращает код выхода (`Aggregator.Gate`).
 
   `cfg` — map: `:reviews_dir`, `:diff_path` (nil → без inline-комментов),
-  `:window`, `:fail_on`, `:model`, `:claude_bin`, `:expected_agents`, `:github_output`.
+  `:window`, `:fail_on`, `:model`, `:claude_bin`, `:expected_agents`, `:github_output`,
+  `:rerun` (чекбокс ручного ререрана в обзоре).
   """
   @spec run(Github.t(), map()) :: 0 | 1
   def run(%Github{} = client, cfg) do
@@ -60,7 +61,8 @@ defmodule Aggregator.CLI do
         failed_agents: Artifacts.missing_agents(result, cfg.expected_agents),
         decision: decision,
         messages: polish(clusters, cfg),
-        walkthrough: walkthrough(diff_text, clusters, cfg)
+        walkthrough: walkthrough(diff_text, clusters, cfg),
+        rerun: cfg.rerun
       })
 
     summary_url = post(client, output)
@@ -189,8 +191,17 @@ defmodule Aggregator.CLI do
       model: env("POLISH_MODEL", @default_model),
       claude_bin: env("CLAUDE_BIN", "claude"),
       expected_agents: expected_agents_from_env(),
-      github_output: System.get_env("GITHUB_OUTPUT")
+      github_output: System.get_env("GITHUB_OUTPUT"),
+      # Чекбокс ручного ререрана в обзоре (app-режим его включает; само-ревью — нет).
+      rerun: env_bool("RERUN_CHECKBOX", false)
     }
+  end
+
+  defp env_bool(key, default) do
+    case System.get_env(key) do
+      v when v in [nil, ""] -> default
+      v -> String.downcase(String.trim(v)) in ["1", "true", "yes"]
+    end
   end
 
   # Размер ожидаемой панели настраивается (EXPECTED_AGENTS, через запятую): чтобы

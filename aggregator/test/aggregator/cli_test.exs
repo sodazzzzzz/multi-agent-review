@@ -124,7 +124,8 @@ defmodule Aggregator.CLITest do
       model: "claude-opus-4-8",
       claude_bin: fake_claude(dir),
       expected_agents: ["claude", "codex", "deepseek"],
-      github_output: out_path
+      github_output: out_path,
+      rerun: false
     }
 
     %{cfg: cfg, out_path: out_path, client: capturing_client()}
