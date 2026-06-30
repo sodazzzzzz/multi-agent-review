@@ -157,7 +157,7 @@ defmodule Aggregator.CLI do
   # --- окружение ---
 
   defp client_from_env do
-    [owner, repo] = String.split(System.fetch_env!("GITHUB_REPOSITORY"), "/", parts: 2)
+    [owner, repo] = String.split(target_slug(), "/", parts: 2)
 
     Github.new(
       owner: owner,
@@ -165,6 +165,19 @@ defmodule Aggregator.CLI do
       pr: String.to_integer(System.fetch_env!("PR_NUMBER")),
       token: System.fetch_env!("GITHUB_TOKEN")
     )
+  end
+
+  @doc false
+  # Куда постим обзор: TARGET_REPO (центральный App ревьюит сторонний репо) либо
+  # GITHUB_REPOSITORY (само-ревью). GITHUB_REPOSITORY НЕ трогаем — codex_auth.sh пишет
+  # ротированный одноразовый токен обратно в секрет ЭТОГО репо именно по нему.
+  # Публичная (@doc false) ради юнит-теста override.
+  @spec target_slug() :: String.t()
+  def target_slug do
+    case System.get_env("TARGET_REPO") do
+      v when v in [nil, ""] -> System.fetch_env!("GITHUB_REPOSITORY")
+      v -> v
+    end
   end
 
   defp config_from_env do
