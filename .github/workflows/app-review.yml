@@ -75,13 +75,16 @@ jobs:
 
             # Установка App'а на этот репо (по JWT). Нет установки → пропускаем (не в allowlist
             # смысле, а просто App туда не поставлен).
-            inst="$(GH_TOKEN="$jwt" gh api "repos/$repo/installation" --jq '.id' 2>/dev/null)" \
-              || { echo "::warning::App не установлен на $repo — пропуск"; continue; }
+            # app-JWT шлём как Bearer ЯВНО: gh с GH_TOKEN ставит схему `token`, а её GitHub
+            # для JWT отвергает (401 «could not be decoded»). -H перекрывает заголовок gh.
+            inst="$(GH_TOKEN="$jwt" gh api "repos/$repo/installation" \
+                    -H "Authorization: Bearer $jwt" --jq '.id' 2>_ie)" \
+              || { echo "::warning::$repo: нет установки App или доступа — $(tr -d '\r' <_ie | tr '\n' ' ' | cut -c1-200)"; continue; }
 
             # Installation-токен, ограниченный этим репо.
             tok="$(GH_TOKEN="$jwt" gh api -X POST "app/installations/$inst/access_tokens" \
-                    -f "repositories[]=$name" --jq '.token' 2>/dev/null)" \
-              || { echo "::warning::не выпустить токен для $repo — пропуск"; continue; }
+                    -H "Authorization: Bearer $jwt" -f "repositories[]=$name" --jq '.token' 2>_te)" \
+              || { echo "::warning::не выпустить токен для $repo — $(tr -d '\r' <_te | tr '\n' ' ' | cut -c1-200)"; continue; }
 
             if [ -n "$ONLY_PR" ]; then
               prs="$ONLY_PR"
