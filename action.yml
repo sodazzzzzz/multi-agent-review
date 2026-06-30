@@ -45,6 +45,10 @@ inputs:
     description: "OAuth-токен Claude для Polish (авторизует claude CLI в контейнере). Пусто → Polish деградирует к детерминированному тексту."
     required: false
     default: ""
+  target-repo:
+    description: "Целевой репозиторий owner/repo для постинга обзора. Пусто → GITHUB_REPOSITORY (само-ревью). Центральный App-режим задаёт сторонний репо."
+    required: false
+    default: ""
 
 outputs:
   clusters:
@@ -58,7 +62,7 @@ runs:
   using: "docker"
   # Релизный образ из GHCR (собирается release.yml на тег v*) — не пересобираем Dockerfile
   # на каждый прогон. Версия пинится явно; бампится вместе с новым тегом релиза.
-  image: "docker://ghcr.io/sodazzzzzz/multi-agent-review:0.1.0"
+  image: "docker://ghcr.io/sodazzzzzz/multi-agent-review:0.2.0"
   env:
     GITHUB_TOKEN: ${{ inputs.github-token }}
     PR_NUMBER: ${{ inputs.pr-number }}
@@ -73,3 +77,4 @@ runs:
     POLISH_MODEL: ${{ inputs.polish-model }}
     CLAUDE_BIN: ${{ inputs.claude-bin }}
     CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude-oauth-token }}
+    TARGET_REPO: ${{ inputs.target-repo }}
