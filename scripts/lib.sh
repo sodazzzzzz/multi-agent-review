@@ -26,6 +26,14 @@ Rules:
 - Do not invent problems. If there are none, return [].
 - Write every "message" in English.
 PROMPT
+
+  # Проектная рубрика ревьюимого репо (бот тянет её .github/STANDARDS.md в REPO_STANDARDS_FILE).
+  # Задана и непуста → дописываем в конец промпта. Контракт вывода (P0|P1|P2, только JSON) выше
+  # ГЛАВНЕЕ: если рубрика вводит свои метки серьёзности, модель маппит их на P0/P1/P2.
+  if [ -n "${REPO_STANDARDS_FILE:-}" ] && [ -s "${REPO_STANDARDS_FILE}" ]; then
+    printf '\n\n---\nProject-specific review standards for the repository under review. Apply them. When they use their own severity vocabulary, map it onto the P0/P1/P2 JSON contract above.\n\n'
+    cat "${REPO_STANDARDS_FILE}"
+  fi
 }
 
 # extract_array <raw> — печатает JSON-массив находок (иначе пусто). Снимает

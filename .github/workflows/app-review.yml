@@ -184,18 +184,27 @@ jobs:
             git -C _t diff "$base...$head" >diff.patch
           fi
           wc -l diff.patch
+          # Рубрика ревьюимого репо (если есть в .github/STANDARDS.md) → в промпт агентов.
+          # Нет файла / нет доступа → пустой файл, промпт как раньше (lib.sh пропустит пустой).
+          if ! gh api "repos/$REPO/contents/.github/STANDARDS.md" \
+                 -H "Accept: application/vnd.github.raw" >repo-standards.md 2>/dev/null; then
+            : >repo-standards.md
+          fi
+          wc -l repo-standards.md
       - name: Install Claude CLI
         run: npm install -g @anthropic-ai/claude-code
       - name: Claude
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL }}
+          REPO_STANDARDS_FILE: repo-standards.md
         run: bash scripts/review_claude.sh diff.patch review-claude.json
       - name: DeepSeek
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           DEEPSEEK_BASE_URL: ${{ vars.DEEPSEEK_BASE_URL }}
           DEEPSEEK_MODEL: ${{ vars.DEEPSEEK_MODEL }}
+          REPO_STANDARDS_FILE: repo-standards.md
         run: bash scripts/review_deepseek.sh diff.patch review-deepseek.json
       - name: Upload (diff + stateless reviews)
         if: always()
@@ -204,6 +213,7 @@ jobs:
           name: rev-${{ matrix.slug }}
           path: |
             diff.patch
+            repo-standards.md
             review-claude.json
             review-deepseek.json
           if-no-files-found: ignore
@@ -246,6 +256,7 @@ jobs:
           for d in _revs/rev-*/; do
             slug="$(basename "$d")"; slug="${slug#rev-}"
             echo "=== codex: $slug ==="
+            REPO_STANDARDS_FILE="${d}repo-standards.md" \
             bash scripts/review_codex.sh "${d}diff.patch" "codexout/review-codex-${slug}.json" \
               || echo "::warning::codex не отработал для $slug"
           done
