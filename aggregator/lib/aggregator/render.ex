@@ -34,6 +34,10 @@ defmodule Aggregator.Render do
 
   @full_panel 3
 
+  # Скрытый маркер в теле обзора — по нему discover находит НАШИ комменты (дедуп «PR уже
+  # отревьюен», без авто-перепрогонов). Невидим в рендере, есть в raw-теле через API.
+  @marker "<!-- multi-agent-review -->"
+
   # Лимит тела issue-коммента GitHub — 65536; держим запас. Summary теперь компактный
   # (индекс + свёрнутые секции), но «Comments outside diff» на огромном PR может пробить
   # лимит → деградируем (полные записи → индекс) и в крайнем случае усекаем.
@@ -43,6 +47,10 @@ defmodule Aggregator.Render do
 
   # Голова «1-го предложения» оканчивается распространённым сокращением → НЕ граница.
   @abbrev_tail ~r/\b(e\.g|i\.e|etc|vs|cf|al|Mr|Mrs|Ms|Dr|Prof|No|Fig|Eq|Sec|Ch|Inc|Ltd)\.$/i
+
+  @doc "Скрытый маркер наших обзор-комментов (для дедупа снаружи воркфлоу)."
+  @spec summary_marker() :: String.t()
+  def summary_marker, do: @marker
 
   @doc "Построить обзор-коммент (`summary`) + инлайн-комменты (`comments`) из кластеров."
   @spec render([Cluster.t()], map()) :: output()
@@ -62,7 +70,8 @@ defmodule Aggregator.Render do
       failed_agents: Map.get(context, :failed_agents, []),
       decision: Map.get(context, :decision, {:pass, "advisory"}),
       messages: Map.get(context, :messages, %{}),
-      walkthrough: Map.get(context, :walkthrough, nil)
+      walkthrough: Map.get(context, :walkthrough, nil),
+      rerun_url: Map.get(context, :rerun_url, nil)
     }
   end
 
@@ -102,13 +111,15 @@ defmodule Aggregator.Render do
     outside = for {c, nil} <- tagged, do: c
 
     [
+      @marker,
       header(clusters, ctx),
       failed_banner(ctx.failed_agents),
       gate_line(ctx.decision),
       walkthrough_details(ctx.walkthrough),
       findings_details(tagged, ctx),
       outside_details(outside, ctx, full?),
-      footer(ctx.decision)
+      rerun_link(ctx.rerun_url),
+      footer(ctx.decision, ctx.rerun_url)
     ]
     |> Enum.reject(&blank?/1)
     |> Enum.join("\n\n")
@@ -435,15 +446,25 @@ defmodule Aggregator.Render do
     end
   end
 
+  # Кликабельный реран (app-режим): гиперссылка на реле, подписанная HMAC. Клик → реле →
+  # repository_dispatch → новый обзор. nil (само-ревью) → ссылки нет.
+  defp rerun_link(nil), do: nil
+  defp rerun_link(url), do: "🔄 **[Re-run this review](#{url})**"
+
   # Decision-aware: не врать «advisory», когда fail_on реально блокирует merge.
-  defp footer({decision, _reason}) do
+  defp footer({decision, _reason}, rerun_url) do
     stance =
       case decision do
         :block -> "blocking this merge (per `fail_on`)"
         :pass -> "advisory — not blocking merge"
       end
 
-    "<sub>Independent AI panel · #{stance}. Re-run with `/rerun-review` in a PR comment.</sub>"
+    rerun_hint =
+      if rerun_url,
+        do: "Re-run: use the link above.",
+        else: "Re-run with `/rerun-review` in a PR comment."
+
+    "<sub>Independent AI panel · #{stance}. #{rerun_hint}</sub>"
   end
 
   # Забор (≥3 бэктика) длиннее самой длинной серии бэктиков внутри текста — иначе код,

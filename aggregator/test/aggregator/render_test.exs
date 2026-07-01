@@ -57,6 +57,29 @@ defmodule Aggregator.RenderTest do
     end
   end
 
+  describe "маркер и реран-ссылка" do
+    test "скрытый маркер всегда в теле обзора (по нему discover дедупит снаружи)" do
+      assert Render.render([]).summary =~ Render.summary_marker()
+
+      assert Render.render(Cluster.build([finding(line: 1)])).summary =~
+               "<!-- multi-agent-review -->"
+    end
+
+    test "rerun_url задан → кликабельная ссылка + футер «use the link above», без /rerun-review" do
+      url = "https://relay.example/rerun?repo=o%2Fr&pr=5&sig=deadbeef"
+      out = Render.render(Cluster.build([finding(line: 1)]), %{rerun_url: url})
+      assert out.summary =~ "🔄 **[Re-run this review](#{url})**"
+      assert out.summary =~ "Re-run: use the link above."
+      refute out.summary =~ "/rerun-review"
+    end
+
+    test "по умолчанию (rerun_url nil) — без ссылки, футер с /rerun-review" do
+      out = Render.render(Cluster.build([finding(line: 1)]))
+      refute out.summary =~ "Re-run this review"
+      assert out.summary =~ "/rerun-review"
+    end
+  end
+
   describe "индекс находок (свёрнутый дропдаун)" do
     test "находки — в <details> Findings, по строке на кластер" do
       clusters =
