@@ -20,6 +20,9 @@ on:
         description: "Точечно: номер PR (пусто → все открытые)"
         required: false
         default: ""
+  # Мгновенный триггер от реле (сервер): app-review — ревью нового PR; app-review-rerun — реран по ссылке.
+  repository_dispatch:
+    types: [app-review, app-review-rerun]
 
 # GITHUB_TOKEN нужен только для checkout ЭТОГО публичного репо (scripts/). В целевые репо
 # ходим токеном App'а, который выпускаем из APP_ID/APP_PRIVATE_KEY.
@@ -48,8 +51,11 @@ jobs:
           APP_ID: ${{ secrets.APP_ID }}
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
           ALLOWLIST: ${{ vars.REPO_ALLOWLIST }}
-          ONLY_REPO: ${{ github.event.inputs.repo }}
-          ONLY_PR: ${{ github.event.inputs.pr }}
+          # Точечная цель — из workflow_dispatch inputs ЛИБО из repository_dispatch payload (реле).
+          ONLY_REPO: ${{ github.event.inputs.repo || github.event.client_payload.repo }}
+          ONLY_PR: ${{ github.event.inputs.pr || github.event.client_payload.pr }}
+          # Реран по ссылке (event_type app-review-rerun) обходит дедуп.
+          FORCE: ${{ github.event.action == 'app-review-rerun' }}
         run: |
           set -euo pipefail
           b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
@@ -66,7 +72,18 @@ jobs:
           sig=$(printf '%s' "$hdr.$pld" | openssl dgst -sha256 -sign <(printf '%s' "$APP_PRIVATE_KEY") | b64url)
           jwt="$hdr.$pld.$sig"
 
-          repos="${ONLY_REPO:-$(printf '%s' "$ALLOWLIST" | tr ',' ' ')}"
+          # Точечная цель (workflow_dispatch / вебхук / реран через client_payload) ОБЯЗАНА быть
+          # в REPO_ALLOWLIST — иначе жёсткий фильтр обойдён: App публичный, кто угодно поставит его
+          # на свой репо и зафаерит вебхук с чужим client_payload.repo (сжёг бы нашу квоту/минуты).
+          if [ -n "$ONLY_REPO" ]; then
+            only="$(printf '%s' "$ONLY_REPO" | tr -d '[:space:]')"
+            case ",$(printf '%s' "$ALLOWLIST" | tr -d '[:space:]')," in
+              *",$only,"*) repos="$only" ;;
+              *) echo "::warning::$only вне REPO_ALLOWLIST — игнорируем"; repos="" ;;
+            esac
+          else
+            repos="$(printf '%s' "$ALLOWLIST" | tr ',' ' ')"
+          fi
           matrix='[]'
           for repo in $repos; do
             repo="$(printf '%s' "$repo" | tr -d '[:space:]')"
@@ -94,15 +111,18 @@ jobs:
             fi
 
             for pr in $prs; do
+              case "$pr" in ''|*[!0-9]*) echo "::warning::$repo#$pr — не число, пропуск"; continue ;; esac
               head="$(GH_TOKEN="$tok" gh api "repos/$repo/pulls/$pr" --jq '.head.sha' 2>/dev/null)" \
                 || { echo "::warning::нет PR $repo#$pr — пропуск"; continue; }
-              # Дедуп: наш Check Run уже на этом head → этот head уже отревьюен (новый пуш =
-              # новый head = новый прогон). Фильтр по имени нашего чека.
-              seen="$(GH_TOKEN="$tok" gh api "repos/$repo/commits/$head/check-runs" \
-                       --jq '[.check_runs[] | select(.name == "multi-agent-review")] | length' 2>/dev/null || echo 0)"
-              if [ "$seen" != "0" ]; then
-                echo "skip $repo#$pr@${head:0:7} — уже отревьюено"
-                continue
+              # Дедуп НА УРОВНЕ PR (без авто-перепрогона): наш обзор-коммент уже есть → скип.
+              # Новые коммиты сами ревью НЕ перезапускают. FORCE=true (реран по ссылке) обходит дедуп.
+              if [ "$FORCE" != "true" ]; then
+                cid="$(GH_TOKEN="$tok" gh api --paginate "repos/$repo/issues/$pr/comments" \
+                         --jq '.[] | select(.body | contains("<!-- multi-agent-review -->")) | .id' 2>/dev/null | tail -1 || true)"
+                if [ -n "$cid" ]; then
+                  echo "skip $repo#$pr — уже отревьюено (реран не запрошен)"
+                  continue
+                fi
               fi
 
               crid="$(GH_TOKEN="$tok" gh api -X POST "repos/$repo/check-runs" \
@@ -284,7 +304,7 @@ jobs:
         id: aggregate
         if: steps.guard.outputs.ok == '1'
         continue-on-error: true
-        uses: sodazzzzzz/multi-agent-review@v0.2.0
+        uses: sodazzzzzz/multi-agent-review@v0.3.0
         with:
           github-token: ${{ steps.tok.outputs.token }}
           target-repo: ${{ matrix.repo }}
@@ -295,6 +315,9 @@ jobs:
           claude-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           polish-model: ${{ vars.CLAUDE_MODEL || 'claude-opus-4-8' }}
           expected-agents: ${{ vars.ENABLE_CODEX == 'true' && 'claude,codex,deepseek' || 'claude,deepseek' }}
+          # Реран-ссылка в обзоре: база (реле) + секрет подписи. Пусто → ссылки нет.
+          relay-url: ${{ vars.RELAY_URL }}
+          rerun-secret: ${{ secrets.RERUN_SECRET }}
       - name: Complete check run
         if: always()
         env:

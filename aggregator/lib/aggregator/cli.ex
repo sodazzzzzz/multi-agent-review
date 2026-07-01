@@ -38,7 +38,8 @@ defmodule Aggregator.CLI do
   Выполнить прогон с явными зависимостями. Возвращает код выхода (`Aggregator.Gate`).
 
   `cfg` — map: `:reviews_dir`, `:diff_path` (nil → без inline-комментов),
-  `:window`, `:fail_on`, `:model`, `:claude_bin`, `:expected_agents`, `:github_output`.
+  `:window`, `:fail_on`, `:model`, `:claude_bin`, `:expected_agents`, `:github_output`,
+  `:rerun_url` (подписанная ссылка ререрана в обзоре или nil).
   """
   @spec run(Github.t(), map()) :: 0 | 1
   def run(%Github{} = client, cfg) do
@@ -60,7 +61,8 @@ defmodule Aggregator.CLI do
         failed_agents: Artifacts.missing_agents(result, cfg.expected_agents),
         decision: decision,
         messages: polish(clusters, cfg),
-        walkthrough: walkthrough(diff_text, clusters, cfg)
+        walkthrough: walkthrough(diff_text, clusters, cfg),
+        rerun_url: cfg.rerun_url
       })
 
     summary_url = post(client, output)
@@ -189,8 +191,25 @@ defmodule Aggregator.CLI do
       model: env("POLISH_MODEL", @default_model),
       claude_bin: env("CLAUDE_BIN", "claude"),
       expected_agents: expected_agents_from_env(),
-      github_output: System.get_env("GITHUB_OUTPUT")
+      github_output: System.get_env("GITHUB_OUTPUT"),
+      rerun_url: rerun_url()
     }
+  end
+
+  # Подписанная реран-ссылка на реле: RELAY_URL/rerun?repo=&pr=&sig=HMAC(RERUN_SECRET,"repo#pr").
+  # Нет базы/секрета (само-ревью или сервер не подключён) → nil, ссылки в обзоре не будет.
+  # Подпись совпадает с проверкой в relay/main.go (validRerunSig).
+  defp rerun_url do
+    with base when base not in [nil, ""] <- System.get_env("RELAY_URL"),
+         secret when secret not in [nil, ""] <- System.get_env("RERUN_SECRET"),
+         pr when pr not in [nil, ""] <- System.get_env("PR_NUMBER") do
+      slug = target_slug()
+      sig = :crypto.mac(:hmac, :sha256, secret, "#{slug}##{pr}") |> Base.encode16(case: :lower)
+
+      "#{String.trim_trailing(base, "/")}/rerun?repo=#{URI.encode_www_form(slug)}&pr=#{pr}&sig=#{sig}"
+    else
+      _ -> nil
+    end
   end
 
   # Размер ожидаемой панели настраивается (EXPECTED_AGENTS, через запятую): чтобы
