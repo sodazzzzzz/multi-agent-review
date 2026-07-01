@@ -13,10 +13,9 @@ App webhook (pull_request: opened)   ─┐
 Эндпоинты: `POST /webhook`, `GET /rerun`, `GET /healthz`. Образ — distroless (~3 МБ),
 слушает порт **8080**.
 
-> **Порядок.** Части A–C (секреты, PAT, деплой реле) можно делать **сейчас** — они самодостаточны,
-> цель этого этапа: увидеть `GET /healthz → ok`. Части D–E (App-webhook и секреты репо) включаем
-> ПОСЛЕ того, как приедет воркфлоу-часть (`repository_dispatch` + рендер реран-ссылки), иначе
-> dispatch будет уходить «в никуда».
+> **Воркфлоу-часть уже в `main` (релиз v0.3.0)** — реле дёргает `repository_dispatch`, а
+> `app-review.yml` его обрабатывает. Поэтому части A–E проходятся подряд. Если секреты (A) и PAT (B)
+> уже сделаны — начинай с **Части C** (деплой в Dokploy), затем D–E.
 
 ---
 
@@ -67,7 +66,7 @@ HTTPS-URL. Названия полей могут чуть отличаться 
 ### C2. Источник (Git)
 1. Вкладка **Provider / Source** → тип **Git** (generic).
 2. **Repository URL:** `https://github.com/sodazzzzzz/multi-agent-review.git`
-3. **Branch:** `feat/webhook-relay` *(пока не смержили этап 5; после мержа переключишь на `main`)*.
+3. **Branch:** `main` (реле в `main` начиная с релиза v0.3.0).
 4. SSH-ключ не нужен (репо публичный).
 
 ### C3. Сборка (Dockerfile)
@@ -106,7 +105,7 @@ GITHUB_DISPATCH_TOKEN=<PAT из Части B>
 
 ---
 
-## Часть D. Вебхук в GitHub App *(после воркфлоу-части)*
+## Часть D. Вебхук в GitHub App
 
 GitHub → Settings → Developer settings → **GitHub Apps** → `multi-agent-review` → **Edit**:
 1. **Webhook → поставить галку Active** (мы её снимали для крон-модели).
@@ -121,7 +120,7 @@ GitHub сразу пошлёт `ping` — в логах реле будет ст
 
 ---
 
-## Часть E. Секрет и переменная в репо бота *(после воркфлоу-части)*
+## Часть E. Секрет и переменная в репо бота
 
 Репо `multi-agent-review` → **Settings → Secrets and variables → Actions**:
 - **Secrets → New:** `RERUN_SECRET` = **то же** значение, что в реле (аггрегатор подписывает им реран-ссылки — подписи должны совпасть).
