@@ -101,8 +101,11 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var p struct {
-		Action     string `json:"action"`
-		Number     int    `json:"number"`
+		Action      string `json:"action"`
+		Number      int    `json:"number"`
+		PullRequest struct {
+			Draft bool `json:"draft"`
+		} `json:"pull_request"`
 		Repository struct {
 			FullName string `json:"full_name"`
 		} `json:"repository"`
@@ -112,11 +115,7 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Только открытие/переоткрытие/готовность из черновика. synchronize (новые коммиты)
-	// НЕ триггерит — авто-перепрогонов быть не должно (реран только вручную по ссылке).
-	switch p.Action {
-	case "opened", "reopened", "ready_for_review":
-	default:
+	if !shouldReview(p.Action, p.PullRequest.Draft) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -128,6 +127,20 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("review dispatched: %s#%d (%s)", p.Repository.FullName, p.Number, p.Action)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// shouldReview — брать ли PR в ревью по вебхуку. Черновики (draft) НЕ берём на opened/
+// reopened — дождёмся ready_for_review (draft→ready). synchronize (новые коммиты) и прочие
+// действия — нет (авто-перепрогонов нет; реран только по ссылке).
+func shouldReview(action string, draft bool) bool {
+	switch action {
+	case "ready_for_review":
+		return true
+	case "opened", "reopened":
+		return !draft
+	default:
+		return false
+	}
 }
 
 func validWebhookSig(header string, body []byte) bool {
