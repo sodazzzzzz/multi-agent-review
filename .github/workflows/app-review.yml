@@ -72,7 +72,18 @@ jobs:
           sig=$(printf '%s' "$hdr.$pld" | openssl dgst -sha256 -sign <(printf '%s' "$APP_PRIVATE_KEY") | b64url)
           jwt="$hdr.$pld.$sig"
 
-          repos="${ONLY_REPO:-$(printf '%s' "$ALLOWLIST" | tr ',' ' ')}"
+          # Точечная цель (workflow_dispatch / вебхук / реран через client_payload) ОБЯЗАНА быть
+          # в REPO_ALLOWLIST — иначе жёсткий фильтр обойдён: App публичный, кто угодно поставит его
+          # на свой репо и зафаерит вебхук с чужим client_payload.repo (сжёг бы нашу квоту/минуты).
+          if [ -n "$ONLY_REPO" ]; then
+            only="$(printf '%s' "$ONLY_REPO" | tr -d '[:space:]')"
+            case ",$(printf '%s' "$ALLOWLIST" | tr -d '[:space:]')," in
+              *",$only,"*) repos="$only" ;;
+              *) echo "::warning::$only вне REPO_ALLOWLIST — игнорируем"; repos="" ;;
+            esac
+          else
+            repos="$(printf '%s' "$ALLOWLIST" | tr ',' ' ')"
+          fi
           matrix='[]'
           for repo in $repos; do
             repo="$(printf '%s' "$repo" | tr -d '[:space:]')"
@@ -100,6 +111,7 @@ jobs:
             fi
 
             for pr in $prs; do
+              case "$pr" in ''|*[!0-9]*) echo "::warning::$repo#$pr — не число, пропуск"; continue ;; esac
               head="$(GH_TOKEN="$tok" gh api "repos/$repo/pulls/$pr" --jq '.head.sha' 2>/dev/null)" \
                 || { echo "::warning::нет PR $repo#$pr — пропуск"; continue; }
               # Дедуп НА УРОВНЕ PR (без авто-перепрогона): наш обзор-коммент уже есть → скип.
