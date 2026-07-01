@@ -112,8 +112,14 @@ jobs:
 
             for pr in $prs; do
               case "$pr" in ''|*[!0-9]*) echo "::warning::$repo#$pr — не число, пропуск"; continue ;; esac
-              head="$(GH_TOKEN="$tok" gh api "repos/$repo/pulls/$pr" --jq '.head.sha' 2>/dev/null)" \
+              meta="$(GH_TOKEN="$tok" gh api "repos/$repo/pulls/$pr" --jq '"\(.head.sha) \(.draft)"' 2>/dev/null)" \
                 || { echo "::warning::нет PR $repo#$pr — пропуск"; continue; }
+              head="${meta%% *}"; draft="${meta##* }"
+              # Черновики (draft) НЕ берём в работу — дождёмся ready_for_review. FORCE (реран) — исключение.
+              if [ "$draft" = "true" ] && [ "$FORCE" != "true" ]; then
+                echo "skip $repo#$pr — draft (черновик)"
+                continue
+              fi
               # Дедуп НА УРОВНЕ PR (без авто-перепрогона): наш обзор-коммент уже есть → скип.
               # Новые коммиты сами ревью НЕ перезапускают. FORCE=true (реран по ссылке) обходит дедуп.
               if [ "$FORCE" != "true" ]; then
