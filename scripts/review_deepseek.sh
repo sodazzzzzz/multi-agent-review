@@ -26,11 +26,14 @@ call_deepseek() {
     --rawfile diff "$diff_file" \
     '{model: $model, stream: false,
       messages: [{role: "user", content: ($instr + "\n\n=== DIFF ===\n" + $diff)}]}')
-  resp=$(curl -sS --fail-with-body --max-time 180 \
+  # body с диффом шлём через stdin (--data-binary @-), а не аргументом: большой JSON
+  # не влезает в MAX_ARG_STRLEN (~128 КБ) и curl падает «Argument list too long» ещё
+  # до сети. Ровно этот же лимит на входе обходит --rawfile выше.
+  resp=$(printf '%s' "$body" | curl -sS --fail-with-body --max-time 180 \
     -X POST "${base_url%/}/chat/completions" \
     -H "Authorization: Bearer ${DEEPSEEK_API_KEY}" \
     -H "Content-Type: application/json" \
-    -d "$body") || return 1
+    --data-binary @-) || return 1
   printf '%s' "$resp" | jq -r '.choices[0].message.content // empty'
 }
 
