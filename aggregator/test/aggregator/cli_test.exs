@@ -155,7 +155,7 @@ defmodule Aggregator.CLITest do
     assert summary =~ "причёсано P0"
     assert summary =~ "panel 2/3"
     assert summary =~ "Did not complete: deepseek"
-    assert summary =~ "🟡 2/3"
+    assert summary =~ "2/3 · medium-conf"
 
     # Walkthrough-секция (LLM-обзор) с TL;DR и когортой — второй best-effort вызов claude
     assert summary =~ "📝 Walkthrough"

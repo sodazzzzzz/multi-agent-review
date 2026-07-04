@@ -102,22 +102,21 @@ defmodule Aggregator.RenderTest do
   end
 
   describe "консенсус-бейдж — знаменатель = expected (#5)" do
-    test "полный консенсус 3/3 → зелёный; одиночка → 1/3 low-confidence" do
+    test "полный консенсус 3/3 → high-conf; одиночка → 1/3 low-conf" do
       three =
         Cluster.build(
           for a <- ~w(claude codex deepseek),
               do: finding(agent: a, file: "lib/a.ex", line: 5, severity: "P0")
         )
 
-      assert Render.render(three).summary =~ "🟢 3/3"
+      assert Render.render(three).summary =~ "3/3 · high-conf"
 
       one = Cluster.build([finding(agent: "claude", line: 1, severity: "P1")])
       out = Render.render(one)
-      assert out.summary =~ "🔴 1/3"
-      assert out.summary =~ "low-confidence"
+      assert out.summary =~ "1/3 · low-conf"
     end
 
-    test "упавший агент: согласие двух → 2/3 жёлтый (не 2/2)" do
+    test "упавший агент: согласие двух → 2/3 medium-conf (не 2/2)" do
       clusters =
         Cluster.build([
           finding(agent: "claude", file: "lib/a.ex", line: 5, severity: "P0"),
@@ -125,7 +124,7 @@ defmodule Aggregator.RenderTest do
         ])
 
       out = Render.render(clusters, %{panel_size: 2, expected: 3, failed_agents: ["deepseek"]})
-      assert out.summary =~ "🟡 2/3"
+      assert out.summary =~ "2/3 · medium-conf"
       refute out.summary =~ "2/2"
     end
   end
