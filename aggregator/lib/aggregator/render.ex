@@ -292,14 +292,11 @@ defmodule Aggregator.Render do
     |> Enum.join("\n\n")
   end
 
-  # Бейдж-строка CR-стиля: _категория_ | _severity_ | _консенсус_ (курсив, через `|`).
+  # Бейдж-строка CR-стиля: _категория_ | _severity_ | _уверенность_ (курсив, через `|`).
   defp badge_line(%Cluster{severity: sev, consensus: n} = c, ctx) do
     "_#{category_icon(c)} #{label(category(c))}_ | _#{severity_badge(sev)} #{sev}_ | " <>
-      "_#{consensus_badge(n, ctx.expected)} consensus#{low_conf(n)}_"
+      "_#{consensus_badge(n, ctx.expected)}_"
   end
-
-  defp low_conf(1), do: " · low-confidence"
-  defp low_conf(_n), do: ""
 
   # Заголовок (жирный, 1-е предложение) + проза (остальное). Текст экранируем — тело
   # коммента markdown: < открыл бы HTML-тег, а _/* — паразитный курсив.
@@ -383,12 +380,12 @@ defmodule Aggregator.Render do
     "#{fence}#{lang}\n#{text}\n#{fence}"
   end
 
-  defp consensus_badge(n, expected), do: "#{circle(n, expected)} #{n}/#{expected}"
+  defp consensus_badge(n, expected), do: "#{n}/#{expected} · #{confidence(n, expected)}"
 
-  # Одна модель = всегда low-confidence (красный), даже если панель из одной модели.
-  defp circle(1, _expected), do: "🔴"
-  defp circle(n, expected) when n >= expected, do: "🟢"
-  defp circle(_n, _expected), do: "🟡"
+  # Уверенность в правке по консенсусу панели. Одна модель = всегда low-conf.
+  defp confidence(1, _expected), do: "low-conf"
+  defp confidence(n, expected) when n >= expected, do: "high-conf"
+  defp confidence(_n, _expected), do: "medium-conf"
 
   defp severity_badge("P0"), do: "🔴"
   defp severity_badge("P1"), do: "🟠"
