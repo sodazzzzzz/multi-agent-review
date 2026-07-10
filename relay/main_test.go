@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -79,6 +80,59 @@ func TestReadyz(t *testing.T) {
 				t.Errorf("/readyz = %d, want %d (body=%q)", rec.Code, c.wantStatus, rec.Body.String())
 			}
 		})
+	}
+}
+
+func resetMetrics() {
+	metrics.mu.Lock()
+	metrics.ok, metrics.fail, metrics.lastSuccess, metrics.lastFail = 0, 0, 0, 0
+	metrics.any, metrics.lastOK = false, false
+	metrics.mu.Unlock()
+}
+
+func TestMetricsEndpoint(t *testing.T) {
+	decode := func() map[string]any {
+		rec := httptest.NewRecorder()
+		handleMetrics(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("/metrics = %d, want 200", rec.Code)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+			t.Fatalf("невалидный JSON: %v", err)
+		}
+		return m
+	}
+
+	resetMetrics()
+	defer resetMetrics()
+
+	// Пусто: попыток не было → healthy=true.
+	if m := decode(); m["healthy"] != true {
+		t.Errorf("без попыток healthy=%v, want true", m["healthy"])
+	}
+
+	// Последняя попытка упала → healthy=false, fail=1.
+	metrics.record(false)
+	m := decode()
+	if m["healthy"] != false {
+		t.Errorf("после fail healthy=%v, want false", m["healthy"])
+	}
+	if d := m["dispatch"].(map[string]any); d["fail"].(float64) != 1 {
+		t.Errorf("fail=%v, want 1", d["fail"])
+	}
+
+	// Успех после фейла → восстановились: healthy=true.
+	metrics.record(true)
+	if m := decode(); m["healthy"] != true {
+		t.Errorf("после восстановления healthy=%v, want true", m["healthy"])
+	}
+
+	// Новый фейл после успеха → снова healthy=false (тай по секунде не должен ломать сигнал).
+	metrics.record(true)
+	metrics.record(false)
+	if m := decode(); m["healthy"] != false {
+		t.Errorf("fail после ok в ту же секунду: healthy=%v, want false", m["healthy"])
 	}
 }
 

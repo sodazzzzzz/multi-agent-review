@@ -10,8 +10,8 @@ App webhook (pull_request: opened)   ─┐
                                                          └─▶ app-review.yml (Actions)
 ```
 
-Эндпоинты: `POST /webhook`, `GET /rerun`, `GET /healthz`, `GET /readyz`. Образ — distroless
-(~3 МБ), слушает порт **8080**.
+Эндпоинты: `POST /webhook`, `GET /rerun`, `GET /healthz`, `GET /readyz`, `GET /metrics`.
+Образ — distroless (~3 МБ), слушает порт **8080**.
 
 - `GET /healthz` — **liveness** для Dokploy: `200 ok` без внешних вызовов («процесс жив»).
 - `GET /readyz` — **readiness**: лёгкий вызов к GitHub (`GET /rate_limit`, квоту не тратит)
@@ -19,6 +19,18 @@ App webhook (pull_request: opened)   ─┐
   диспатч реально возможен; иначе `503`. Результат кэшируется на 5с.
   **Внешний аптайм-алерт вешать на `/readyz`, а не на `/healthz`** — иначе провал диспатча
   (недоступен GitHub / протух токен) останется незамеченным, как в инциденте 09–10.07.
+- `GET /metrics` — JSON-счётчики диспатча (наблюдаемость + история):
+  ```json
+  {"dispatch":{"ok":128,"fail":3},"last_success_unix":1752,"last_fail_unix":1751,"healthy":true}
+  ```
+  `healthy=false` — если **последняя попытка диспатча упала и не восстановилась**. На него можно
+  повесить keyword/JSON-алерт простого аптайм-монитора (тревога по `"healthy":false`).
+  Дополняет `/readyz`: readyz — «сейчас в принципе не могу диспатчить», `healthy` — «конкретный
+  вебхук пришёл, но его диспатч упал». **Не** алертить по устареванию `last_success` — тихий
+  период без PR это не поломка.
+
+Каждый диспатч также пишет структурную строку в stdout (видно в логах Dokploy):
+`dispatch outcome=ok|fail event=… repo=… pr=… status=… [err=…]`.
 
 > **Воркфлоу-часть уже в `main` (релиз v0.3.0)** — реле дёргает `repository_dispatch`, а
 > `app-review.yml` его обрабатывает. Поэтому части A–E проходятся подряд. Если секреты (A) и PAT (B)

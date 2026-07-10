@@ -14,6 +14,10 @@
 //	GET  /readyz   — readiness: лёгкий вызов к GitHub тем же dispatch-токеном. 200 только
 //	                 если GitHub достижим И токен валиден, т.е. диспатч реально возможен.
 //	                 Внешний аптайм-алерт вешать сюда, а не на /healthz.
+//	GET  /metrics  — JSON-счётчики диспатча (ok/fail, last_success/last_fail, healthy).
+//	                 Для простого аптайм-монитора: алерт по "healthy":false (последняя
+//	                 попытка диспатча упала и не восстановилась). НЕ по устареванию
+//	                 last_success — тихий период без PR это не поломка.
 package main
 
 import (
@@ -68,6 +72,7 @@ func main() {
 		_, _ = io.WriteString(w, "ok")
 	})
 	mux.HandleFunc("/readyz", handleReadyz)
+	mux.HandleFunc("/metrics", handleMetrics)
 
 	srv := &http.Server{
 		Addr:         ":" + port,
@@ -127,12 +132,11 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// dispatch() сам логирует исход и пишет метрику.
 	if err := dispatch("app-review", p.Repository.FullName, p.Number); err != nil {
-		log.Printf("dispatch app-review failed: %v", err)
 		http.Error(w, "dispatch failed", http.StatusBadGateway)
 		return
 	}
-	log.Printf("review dispatched: %s#%d (%s)", p.Repository.FullName, p.Number, p.Action)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -183,11 +187,9 @@ func handleRerun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := dispatch("app-review-rerun", repo, n); err != nil {
-		log.Printf("dispatch rerun failed: %v", err)
 		http.Error(w, "dispatch failed", http.StatusBadGateway)
 		return
 	}
-	log.Printf("rerun dispatched: %s#%d", repo, n)
 	// Возвращаем пользователя в PR — реран пойдёт фоном (Actions, ~минуты).
 	http.Redirect(w, r, fmt.Sprintf("https://github.com/%s/pull/%d", repo, n), http.StatusFound)
 }
@@ -262,9 +264,65 @@ func probeGitHub() error {
 	return nil
 }
 
+// --- метрики диспатча (для простого аптайм-монитора: алерт по "healthy":false) ---
+
+type metricsState struct {
+	mu          sync.Mutex
+	ok, fail    int64
+	lastSuccess int64 // unix, справочно
+	lastFail    int64 // unix, справочно
+	lastOK      bool  // исход последней попытки
+	any         bool  // была ли хоть одна попытка
+}
+
+var metrics metricsState
+
+func (m *metricsState) record(ok bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now().Unix()
+	m.any, m.lastOK = true, ok
+	if ok {
+		m.ok++
+		m.lastSuccess = now
+	} else {
+		m.fail++
+		m.lastFail = now
+	}
+}
+
+func handleMetrics(w http.ResponseWriter, _ *http.Request) {
+	metrics.mu.Lock()
+	// healthy=false только если последняя попытка упала и не восстановилась. НЕ по
+	// устареванию last_success: тихий период без PR — не поломка.
+	resp := map[string]any{
+		"dispatch":          map[string]int64{"ok": metrics.ok, "fail": metrics.fail},
+		"last_success_unix": metrics.lastSuccess,
+		"last_fail_unix":    metrics.lastFail,
+		"healthy":           !metrics.any || metrics.lastOK,
+	}
+	metrics.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
 // --- repository_dispatch на репозиторий бота ---
 
+// dispatch триггерит repository_dispatch, пишет метрику и структурный лог исхода
+// (единая точка для вебхук- и реран-путей).
 func dispatch(eventType, repo string, pr int) error {
+	status, err := postDispatch(eventType, repo, pr)
+	metrics.record(err == nil)
+	if err != nil {
+		log.Printf("dispatch outcome=fail event=%s repo=%s pr=%d status=%d err=%q", eventType, repo, pr, status, err)
+	} else {
+		log.Printf("dispatch outcome=ok event=%s repo=%s pr=%d status=%d", eventType, repo, pr, status)
+	}
+	return err
+}
+
+// postDispatch — сам HTTP-вызов; возвращает HTTP-статус (0 при сетевой ошибке) и ошибку.
+func postDispatch(eventType, repo string, pr int) (int, error) {
 	payload, _ := json.Marshal(map[string]any{
 		"event_type":     eventType,
 		"client_payload": map[string]any{"repo": repo, "pr": pr},
@@ -272,7 +330,7 @@ func dispatch(eventType, repo string, pr int) error {
 	req, err := http.NewRequest(http.MethodPost,
 		githubAPI+"/repos/"+dispatchRepo+"/dispatches", bytes.NewReader(payload))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+dispatchToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -281,12 +339,12 @@ func dispatch(eventType, repo string, pr int) error {
 
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
-		return fmt.Errorf("dispatch status %d: %s", resp.StatusCode, b)
+		return resp.StatusCode, fmt.Errorf("dispatch status %d: %s", resp.StatusCode, b)
 	}
-	return nil
+	return resp.StatusCode, nil
 }
