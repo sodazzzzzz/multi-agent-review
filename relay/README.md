@@ -10,8 +10,15 @@ App webhook (pull_request: opened)   ─┐
                                                          └─▶ app-review.yml (Actions)
 ```
 
-Эндпоинты: `POST /webhook`, `GET /rerun`, `GET /healthz`. Образ — distroless (~3 МБ),
-слушает порт **8080**.
+Эндпоинты: `POST /webhook`, `GET /rerun`, `GET /healthz`, `GET /readyz`. Образ — distroless
+(~3 МБ), слушает порт **8080**.
+
+- `GET /healthz` — **liveness** для Dokploy: `200 ok` без внешних вызовов («процесс жив»).
+- `GET /readyz` — **readiness**: лёгкий вызов к GitHub (`GET /rate_limit`, квоту не тратит)
+  тем же dispatch-токеном. `200 ready` только если GitHub достижим И токен валиден, т.е.
+  диспатч реально возможен; иначе `503`. Результат кэшируется на 5с.
+  **Внешний аптайм-алерт вешать на `/readyz`, а не на `/healthz`** — иначе провал диспатча
+  (недоступен GitHub / протух токен) останется незамеченным, как в инциденте 09–10.07.
 
 > **Воркфлоу-часть уже в `main` (релиз v0.3.0)** — реле дёргает `repository_dispatch`, а
 > `app-review.yml` его обрабатывает. Поэтому части A–E проходятся подряд. Если секреты (A) и PAT (B)
