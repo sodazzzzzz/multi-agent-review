@@ -8,8 +8,6 @@ name: app-review (central)
 # review_stateless [matrix, параллельно: Claude+DeepSeek] + review_codex [ОДИН job,
 # последовательно: общий одноразовый токен] → aggregate [matrix: постинг + Check Run completed].
 on:
-  schedule:
-    - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
       repo:
@@ -29,8 +27,8 @@ on:
 permissions:
   contents: read
 
-# Сериализуем прогоны app-review (cron-тики не должны накладываться). codex-джоб вдобавок
-# в группе codex-auth (общей с codex-warmup) — см. ниже.
+# Сериализуем прогоны app-review (вебхук-триггеры не должны накладываться). codex-джоб
+# вдобавок в группе codex-auth (общей с codex-warmup) — см. ниже.
 concurrency:
   group: app-review
   cancel-in-progress: false
