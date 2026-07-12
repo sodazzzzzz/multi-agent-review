@@ -10,7 +10,10 @@
 //	                 synchronize (новые коммиты) НЕ триггерит — авто-перепрогонов нет.
 //	GET  /rerun    — цель реран-ссылки из обзора. Проверяет подпись (RERUN_SECRET) →
 //	                 dispatch "app-review-rerun" → 302 обратно в PR.
-//	GET  /healthz  — проверка живости для Dokploy.
+//	GET  /healthz  — liveness для Dokploy (дёшево: «процесс жив», без внешних вызовов).
+//	GET  /readyz   — readiness: лёгкий вызов к GitHub тем же dispatch-токеном. 200 только
+//	                 если GitHub достижим И токен валиден, т.е. диспатч реально возможен.
+//	                 Внешний аптайм-алерт вешать сюда, а не на /healthz.
 package main
 
 import (
@@ -27,6 +30,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -35,6 +39,8 @@ var (
 	dispatchToken = os.Getenv("GITHUB_DISPATCH_TOKEN")
 	// Куда слать dispatch — репозиторий бота (где живёт app-review.yml).
 	dispatchRepo = getenv("DISPATCH_REPO", "sodazzzzzz/multi-agent-review")
+	// База GitHub API — переменной, чтобы тесты могли подменить на httptest-сервер.
+	githubAPI = getenv("GITHUB_API_URL", "https://api.github.com")
 	// Секрет App-вебхука (тот же, что в настройках GitHub App).
 	webhookSecret = []byte(os.Getenv("WEBHOOK_SECRET"))
 	// Ключ подписи реран-ссылок (общий с аггрегатором, который эти ссылки строит).
@@ -61,6 +67,7 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ok")
 	})
+	mux.HandleFunc("/readyz", handleReadyz)
 
 	srv := &http.Server{
 		Addr:         ":" + port,
@@ -197,6 +204,64 @@ func validRerunSig(repo, pr, sig string) bool {
 	return subtle.ConstantTimeCompare(got, mac.Sum(nil)) == 1
 }
 
+// --- readiness (глубокая проверка: возможен ли диспатч прямо сейчас) ---
+
+// /healthz (liveness) отвечает ok, даже когда реле не достучится до GitHub или токен
+// протух — то есть ровно когда диспатчи молча падают. /readyz закрывает эту слепую зону:
+// делает лёгкий аутентифицированный вызов к GitHub тем же dispatchToken.
+const readyTTL = 5 * time.Second // кэш, чтобы частый опрос монитором не бил по GitHub
+
+var (
+	readyMu        sync.Mutex
+	readyCheckedAt time.Time
+	readyErr       error // nil → готовы диспатчить
+)
+
+func handleReadyz(w http.ResponseWriter, _ *http.Request) {
+	if err := checkReady(); err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, "not ready: "+err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, "ready")
+}
+
+// checkReady — результат probeGitHub, кэшированный на readyTTL.
+func checkReady() error {
+	readyMu.Lock()
+	defer readyMu.Unlock()
+	if !readyCheckedAt.IsZero() && time.Since(readyCheckedAt) < readyTTL {
+		return readyErr
+	}
+	readyErr = probeGitHub()
+	readyCheckedAt = time.Now()
+	return readyErr
+}
+
+// probeGitHub — GET /rate_limit тем же токеном, что и dispatch. Квоту не тратит; 200
+// означает «GitHub достижим и dispatchToken валиден» → диспатч пройдёт.
+func probeGitHub() error {
+	req, err := http.NewRequest(http.MethodGet, githubAPI+"/rate_limit", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+dispatchToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
+		return fmt.Errorf("github %s: %s", resp.Status, b)
+	}
+	return nil
+}
+
 // --- repository_dispatch на репозиторий бота ---
 
 func dispatch(eventType, repo string, pr int) error {
@@ -205,7 +270,7 @@ func dispatch(eventType, repo string, pr int) error {
 		"client_payload": map[string]any{"repo": repo, "pr": pr},
 	})
 	req, err := http.NewRequest(http.MethodPost,
-		"https://api.github.com/repos/"+dispatchRepo+"/dispatches", bytes.NewReader(payload))
+		githubAPI+"/repos/"+dispatchRepo+"/dispatches", bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
