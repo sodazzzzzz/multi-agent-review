@@ -240,7 +240,7 @@ jobs:
       - name: Checkout scripts
         uses: actions/checkout@v7
       - name: Download diffs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: rev-*
           path: _revs
@@ -297,13 +297,13 @@ jobs:
           owner: ${{ matrix.owner }}
           repositories: ${{ matrix.name }}
       - name: Download stateless (diff + claude + deepseek)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           name: rev-${{ matrix.slug }}
           path: _in
       - name: Download codex (если был)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           name: codex-all
